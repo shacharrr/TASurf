@@ -1,0 +1,29 @@
+<!doctype html>
+<!-- Shown only when the app can't start the editor; the editor itself is
+     tasurf/editor_static/index.html, served by the back end inside the app. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TASurf</title>
+<style>
+  body { margin: 0; height: 100vh; display: grid; place-items: center; background: #11161f; color: #d8dee9;
+         font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 640px; padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  pre { background: #1b2230; padding: 12px; border-radius: 6px; white-space: pre-wrap; color: #ff8a8a; }
+  code { background: #1b2230; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>TASurf couldn't start the editor</h1>
+  <pre id="why">unknown error</pre>
+  <p>The app looks for the TASurf folder (the one with <code>timelines/</code> and <code>tasurf.local.json</code>)
+     around its own location, so keep it inside that folder, or set the <code>TASURF_ROOT</code> environment
+     variable to it.</p>
+</main>
+<script>
+  if (window.TASURF_ERROR) document.getElementById("why").textContent = window.TASURF_ERROR;
+</script>
+</body>
+</html>

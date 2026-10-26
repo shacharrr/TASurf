@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy to tasurf.local.json (not committed). cstrike_dir is the game folder that contains addons/ and cfg/. spcomp is optional; by default third_party/sourcemod and the game's addons/sourcemod/scripting are searched.",
+  "cstrike_dir": "C:/Program Files (x86)/Steam/steamapps/common/Counter-Strike Source/cstrike"
+}

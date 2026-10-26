@@ -1,0 +1,24 @@
+# build output
+out/
+plugin/plugins/*.smx
+
+# machine-specific paths
+tasurf.local.json
+
+# SourceMod/Metamod packages extracted for spcomp
+third_party/
+
+__pycache__/
+*.pyc
+
+# Rust build output (cargo, in rust/)
+rust/target/
+rust/app/gen/
+
+# your own work: timelines (only the example is published), rendered videos
+timelines/*
+!timelines/example_surf.json
+videos/
+
+# the desktop app's settings and Claude Code's local config
+.claude/

@@ -1,0 +1,32 @@
+[package]
+name = "tasurf-app"
+version = "1.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/shacharrr/TASurf"
+description = "TASurf editor as a desktop app: the editor page in its own window, with the Rust back end inside"
+publish = false
+
+[[bin]]
+# not "tasurf": it shares rust/target/release with tasurf.exe (the command line),
+# and Windows file names don't tell TASurf.exe and tasurf.exe apart
+name = "tasurf-editor"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tasurf = { path = ".." }
+tauri = { version = "2", features = [] }
+serde_json = "1"
+
+# WebView2's own settings that Tauri doesn't expose (the browser's keyboard shortcuts off: app_like in main.rs)
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows-core = "0.62"
+
+[features]
+# production build (the page assets embedded, no dev server); `cargo build` gets it by default
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

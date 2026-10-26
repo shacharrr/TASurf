@@ -1,0 +1,32 @@
+[package]
+name = "tasurf"
+version = "1.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/shacharrr/TASurf"
+description = "TASurf back end: timeline baker, run checks, editor operations and the browser editor's server"
+publish = false
+
+[lib]
+name = "tasurf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tasurf"
+path = "src/main.rs"
+
+# app/: the editor as a desktop app (Tauri). `cargo build --release` here builds only
+# the command line; the app is `cargo build --release -p tasurf-app`.
+[workspace]
+members = ["app"]
+
+[dependencies]
+# preserve_order: JSON objects keep their key order, as Python dicts do (timelines are saved as written)
+# float_roundtrip: numbers parse to the nearest double, as Python's json does
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+sha2 = "0.10"
+# the 3D view prototype (bspmap.rs): maps store some lumps LZMA-compressed
+lzma-rs = "0.3"
+
+[profile.release]
+opt-level = 3

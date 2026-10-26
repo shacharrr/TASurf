@@ -1,0 +1,49 @@
+{
+  "_comment": "Example for surf_beginner: walk west from a T spawn, jump, then air-strafe right/left/right/left. Exercises every interpolation mode. To use your own start: in game `tas_setstart surf_beginner`, then replace the start object below with \"start\": \"surf_beginner\".",
+  "format": "tasurf-timeline",
+  "version": 1,
+  "name": "example_surf",
+  "map": "surf_beginner",
+  "length": 330,
+
+  "settings": {
+    "_comment": "Checked against the running game before every run. tickrate cannot be changed at runtime (-tickrate launch option).",
+    "tickrate": 66.6667,
+    "sv_airaccelerate": 150,
+    "sv_gravity": 800,
+    "sv_maxvelocity": 3500
+  },
+
+  "start": {
+    "_comment": "info_player_terrorist from the map's entity lump; the player settles onto the floor below it.",
+    "origin": [-64.0, 3616.0, -31.0],
+    "angles": [0.0, 180.0, 0.0],
+    "velocity": [0.0, 0.0, 0.0],
+    "on_ground": "auto"
+  },
+
+  "input": { "move_speed": 400 },
+
+  "yaw": {
+    "_comment": "Unwrapped degrees. Each key's interp shapes the segment that starts at that key.",
+    "default_interp": "linear",
+    "keys": [
+      [0, 180.0, "hold"],
+      [66, 180.0],
+      [130, 140.0, "smooth"],
+      [200, 190.0, "cubic"],
+      [260, 150.0, "cubic"],
+      [329, 200.0]
+    ]
+  },
+
+  "keys": [
+    { "_comment": "'to' is exclusive: from 0 to 66 holds W on ticks 0..65" },
+    { "key": "W", "from": 0, "to": 66 },
+    { "key": "jump", "from": 66, "to": 67 },
+    { "key": "D", "from": 67, "to": 130 },
+    { "key": "A", "from": 130, "to": 200 },
+    { "key": "D", "from": 200, "to": 260 },
+    { "key": "A", "from": 260, "to": 330, "value": 250 }
+  ]
+}
