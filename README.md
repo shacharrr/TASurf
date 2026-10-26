@@ -1,157 +1,40 @@
 # TASurf
 
-A TAS (tool-assisted speedrun) editor for **Counter-Strike: Source surf and bhop**, on your own local game.
+TASurf is a TAS (tool-assisted speedrun) editor for **Counter-Strike: Source Surf and Bhop gamemodes**, Designed as a video editor for source movement TASing.
 
-You edit a timeline of inputs, tick by tick: where the player looks (yaw keyframes, or auto-strafe, which works
-out the best angle every tick) and which keys are held. The real game engine plays it back on a replay bot, so
-what you see is exactly what the game does: the path is drawn in the game and in the editor, coloured by speed,
-and running the same timeline twice gives byte-identical results. When it's right, **Export** records the run to a
-video with SVR.
-
-Everything happens on your own listen server. The game runs with `-insecure` (no VAC) only in the sessions TASurf
-starts, and TASurf's add-ons are switched off whenever you start CS:S from Steam, so normal play stays stock. Don't
-use it on public servers.
+_Automatically runs CS:S on `-insecure` to minimize VAC danger._
 
 ## Install (Windows)
 
-**1. TASurf.** Download `TASurf_1.0.0_x64-setup.exe` from the
+**1. Prerequisits**:
+* **Counter-Strike: Source** from Steam.
+* **Metamod:Source** and **SourceMod**, see https://www.sourcemod.net/downloads.php?branch=stable for installation
+  (tested with Metamod:Source 1.12.0-git1227 and SourceMod 1.12.0-git7255).
+
+* **SVR** (Source Video Render) by Crashfort,
+  https://github.com/crashfort/SourceDemoRender/releases/latest.
+
+**2. TASurf:**
+Download the installer from the
 [latest release](https://github.com/shacharrr/TASurf/releases/latest) and run it. It installs for your Windows user
 only (no administrator rights needed) and adds TASurf to the Start menu. The installer isn't code-signed, so Windows
 SmartScreen may say it protected your PC: click **More info**, then **Run anyway**.
 
-**2. The game's add-ons**, once (TASurf doesn't include them):
+**Updating:** run the newer installer.
 
-* **Counter-Strike: Source** from Steam.
-* **Metamod:Source** and **SourceMod**, the Windows builds of their stable branches
-  (https://www.sourcemm.net/downloads.php?branch=stable and https://www.sourcemod.net/downloads.php?branch=stable;
-  tested with Metamod:Source 1.12.0-git1227 and SourceMod 1.12.0-git7255). Extract **both** zips into the game's
-  `cstrike` folder (by default `C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Source\cstrike`), which
-  gives `cstrike\addons\metamod\`, `cstrike\addons\sourcemod\` and `cstrike\cfg\sourcemod\`.
-* **SVR** (Source Video Render), which starts the game for TASurf and records the videos: download `svr.zip` from
-  https://github.com/crashfort/SourceDemoRender/releases/latest and extract it anywhere, for example to
-  `Documents\svr`.
+**Uninstalling:** uninstall in `Installed Apps`
 
-**3. Start TASurf.** The **Setup** page finds the game (in Steam's libraries) and SVR (in the usual places); use
-**Browse…** for anything it doesn't find. Its checks say whether everything is in place. Your timelines and videos
-are kept in `Documents\TASurf` (change it under **Project**). Pick a map and press **Launch ▶**: TASurf installs its
-SourceMod plugin into the game and starts CS:S on that map.
-
-**Updating:** run the newer installer. **Uninstalling:** Windows Settings → Apps → TASurf; your timelines and videos
-stay in `Documents\TASurf`. To take the add-ons out of the game as well, delete `cstrike\addons\` (Metamod,
-SourceMod and the two `.vdf` files) and `cstrike\cfg\sourcemod\`.
-
-## Getting started
-
-1. **Launch ▶** on the Setup page starts the game on your map. Join a team: you're in **edit mode** (noclip, no
-   weapons), and a few seconds later the replay bot, **TAS**, joins your team. Runs play on it.
-2. Fly to where the run should start and type `tas_setstart` in the game's console.
-3. In TASurf, **Create timeline** from that start. The **Edit** page opens: add yaw keyframes and key ranges, or
-   let auto-strafe steer. After each edit the game plays the timeline in the background, so the path you see is
-   the game's own.
-4. **Export** renders the run to a video.
-
-Each page has its own help: the **?** in its top right corner, or **F1**. The rest of this README is the full
-reference.
+### Running
+TASurf can run either as an app or in the browser at `127.0.0.1:8768`
 
 ## How it works
 
-```
-timelines/*.json ──python -m tasurf bake──▶ <name>.tas ──tas_run (engine)──▶ <name>_NNN.csv ──▶ verify / check / tas_draw
-```
-
-You edit a timeline of inputs (yaw keyframes and key ranges per tick). The real game engine plays it back on a
-replay bot and records position and velocity every tick, and the resulting path is drawn in game, coloured by
-speed, while you fly around it in noclip. During a run, movement comes from the inputs alone: position and velocity
-are written only by the reset, before tick 0. Running the same timeline twice gives byte-identical CSVs, and the
-plugin checks that for you. The timeline format is in [docs/timeline-format.md](docs/timeline-format.md), the
+The timeline format is in [docs/timeline-format.md](docs/timeline-format.md), the
 other files in [docs/file-formats.md](docs/file-formats.md), and the design in [docs/design.md](docs/design.md).
 
-## Desktop app
+## Documentation
 
-The desktop app is the editor in its own window, so you don't need a browser tab or Python. The window shows
-the same page as the browser editor. The Rust back end runs inside the app and serves the page on
-127.0.0.1:8768 (any free port if that one is taken). The app is meant to be the only program you run for TAS
-work; to just play, start CS:S from Steam as usual.
-
-Its pages are at the bottom, as Resolve's: **Setup**, **Edit** and **Export**. Each has its own help: the **?** in
-its top right corner, or **F1** (Esc closes it).
-
-**Setup** comes first. Under **Game & folders**:
-
-* **Game**, **SVR** and **Project** folders. The game is found in Steam's libraries and SVR
-  (https://github.com/crashfort/SourceDemoRender/releases, extracted anywhere) in the usual places (Desktop,
-  Downloads, Documents, drive roots); pick them with **Browse…** only when they aren't. The project folder holds
-  your timelines (its `timelines` folder) and rendered videos (`videos`); it starts as `Documents\TASurf` (in a
-  copy built from source, the TASurf folder itself).
-* The **Map** to start the game on, and the **game window**'s size (this screen, a preset or your own; borderless
-  or not). SVR records the game window, so this is also the size of videos.
-* **Keep SourceMod off when I start CS:S from Steam** (on by default): Metamod:Source's loader
-  (`addons/metamod_x64.vdf`) is renamed to `metamod_x64.vdf.tasurf-off` except during TASurf's sessions, so a game
-  you start from Steam is stock. If a session ends without the app (it was closed first, or crashed), the app turns
-  it off on its next start.
-* **Checks**: the game, SVR, Metamod:Source, SourceMod, the TASurf plugin, Steam.
-* **Launch ▶**: builds the plugin if its sources changed and installs it and `tasurf_session.cfg` when the game's
-  copies differ, turns Metamod on, starts Steam if it isn't running, and starts CS:S through SVR's launcher
-  (`svr_launcher64.exe tasurf.ini`, a game profile the app writes in SVR's `data/games`) on that map, in that
-  window. TASurf takes the focus back once the game's map has loaded (the game stays behind it). When the game
-  closes, Metamod goes off again.
-
-Setup's **Open timeline** and **Create timeline** open or make the timeline to work on, which takes you to **Edit**.
-The settings are kept in `tasurf.local.json` (`svr_dir`, `project_dir`, `launch`). In the editor, when the game
-isn't running, the game chip in the top bar (**● game: not running · start it…**) goes to Setup's Game & folders.
-
-**Export** records the open timeline's run to a video with SVR:
-
-* The page has SVR's recording options: format (H.264 in mp4 to share, H.264 4:4:4, or DNxHR in mov/mkv for a
-  video editor), frame rate, sound, quality (CRF, or DNxHR's quality) and encoding speed, keyframes only; motion
-  blur (samples per frame, exposure); the speed on screen (SVR's velocity overlay: horizontal, 3D or vertical,
-  font (picked from the fonts installed), size, weight, style, colours, border or shadow, where on screen, how often it changes, its delay); and
-  the camera (show the weapon, seconds of video after the last tick). They're saved in `tasurf.local.json`
-  (`render`) and written as SVR's profile `data/profiles/tasurf.ini` before each render. The video's size is the
-  game window's, set in Setup.
-* **Render ●** saves and bakes like Run. In the game you're moved to the spectators and watch the replay bot in
-  first person (the replay pitch included); the path drawings are hidden; the bot plays the run at normal speed
-  (slower with motion blur, which renders many frames per frame); SVR records from tick 0 to the last tick (plus the
-  seconds after). Then you're put back on your team where you were, with the HUD and view settings SVR changed
-  put back. Other requests wait until then.
-* CRF 0 is lossless, but many players (Windows' own too) can't play lossless H.264; the page warns about it.
-* Once SVR has finished the video (nothing has it open any more and its size has settled; an mp4's index is
-  written last, so a file taken earlier is cut off), it's moved from SVR's `movies` folder to the project's `videos` folder (never over another file:
-  `name.mp4`, `name_2.mp4`, …). The page lists the project's videos, each with **Open** and **Show** (in its folder).
-* Only a game the app started through SVR can render: TASurf checks that SVR is loaded in the game, because without
-  it `startmovie` writes thousands of image files instead. The plugin starts and ends the movie in your game.
-  Rendering needs plugin 0.10; the app's Launch installs it.
-
-## Workflow
-
-1. **Start a local server.** With the desktop app: **Launch ▶** on the Setup page (Game & folders), which starts
-   the game on the map; join a team. Without it, in the console: `map surf_beginner`, then join a team. Either way the plugin
-   runs `tasurf_session.cfg` at the start of every map (no AI bots, no freeze time, long rounds; `tas_session_cfg 0`
-   turns that off). You're in
-   **edit mode**: noclip, no weapons, no damage. A few seconds after you join a
-   team, the **replay bot** (named TAS) joins it; runs and previews play on it. On
-   a map without a bot navigation file the plugin first writes a minimal one and
-   reloads the map once (see [the replay bot](#edit-mode-record-mode-and-the-replay-bot)).
-2. **Capture a start.** Fly to where the run should start and run `tas_setstart`
-   (name defaults to the map). A start captured in noclip has zero velocity and
-   leaves the ground state to the engine. For a start with speed, or on the ground
-   exactly as you stand, use record mode (`tas_mode record`) or a recording.
-   This writes `addons/sourcemod/data/tasurf/starts/<name>.json`.
-3. **Write the timeline.** The easy way is the Setup page: **Create timeline**, then pick that start position. By hand: copy `timelines/example_surf.json`, set `map`, and
-   set `"start": "<name>"`. The baker finds start files in the game's `starts/`
-   folder. Copy the start file into the repo if you want to keep it versioned.
-   Format: [docs/timeline-format.md](docs/timeline-format.md).
-4. **Bake.** This writes `out/baked/<name>.tas` and copies it into the game:
-
-```bash
-python -m tasurf bake timelines/example_surf.json
-```
-
-5. **Run.** In game: `tas_load <name>`, then `tas_run`. The replay bot plays it.
-   When the run finishes, the plugin writes `data/tasurf/runs/<name>_NNN.csv` and
-   draws the path. The [editor](#editor) does steps 3 to 5 for you.
-6. **Iterate.** Edit the JSON, bake, `tas_run` again. The plugin re-reads the
-   baked file on every run, so there's no need to `tas_load` again.
+Currently there is no documentation. Most functionality is explained in the app in the help popup clickable at the right top or via `F1`.
 
 ### Commands
 
@@ -197,18 +80,10 @@ python -m tasurf bake timelines/example_surf.json
 | `tas_preview_lock_view` | 1 | with `tas_bot 0`: keep your view where you were standing while a preview plays on you |
 | `tas_preview_timescale` | 20 | how many times faster than real time a preview plays (`host_timescale`; turns on `sv_cheats` for the preview if it's off, and back off afterwards) |
 
-### Edit mode, record mode and the replay bot
+### Edit mode, record mode and the replay bot (Ingame)
 
-* **Edit mode** (the default): you fly in noclip with no weapons, can't take
-  damage and don't block anyone. `tas_run`, `tas_preview` and everything the
-  editor asks for play on the replay bot, so you can watch from anywhere. While a
-  sped-up preview plays you're held still (with time running 20 times faster,
-  noclip would fly you 20 times as far); you can still look around. If the round
-  restarts, you're put back where you were.
-* **Record mode** (`tas_mode record`): you're a normal player again, walking with
-  a knife, for `tas_record`: a prestrafe, or a rough live run to start a timeline
-  from. Editor requests wait while you're in record mode. `tas_mode edit` takes
-  you back to noclip.
+* **Edit mode** (the default / `tas_mode edit`): Noclip, was made for those who want to edit while looking at the game itself.
+* **Record mode** (`tas_mode record`): Normal play, `tas_record` for starting and stopping a recording, editor will show the recording after you save it.
 * **The replay bot** is a CS:S bot that TASurf adds to your team after you've
   joined one. It runs one command per tick through the same movement code as a
   player, and the plugin replaces every field of its commands, so its own AI
