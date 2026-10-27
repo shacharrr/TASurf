@@ -2,6 +2,7 @@
 
 TASurf is a TAS (tool-assisted speedrun) editor for **Counter-Strike: Source Surf and Bhop gamemodes**, Designed as a video editor for source movement TASing.
 
+Photos of the software in https://github.com/shacharrr/TASurf/gallery
 _Automatically runs CS:S on `-insecure` to minimize VAC danger._
 
 ## Install (Windows)
