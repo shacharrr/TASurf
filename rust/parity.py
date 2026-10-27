@@ -110,6 +110,14 @@ class Sandbox:
                                       [20, 1.005], [60, 30.0, "smooth"], [120, -12.5, "cubic"], [200, 95.0, "cubic"],
                                       [260, -20.0], [329, 7.77]]}
         (self.root / "timelines" / "parity_view.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        # the joint curve (straight lines, rounded at the keys): automatic, integer, fractional and zero widths, a
+        # cubic between joints, a slope a smooth curve left (no width: ignored) and a line said with its width
+        doc = json.loads(src.read_text(encoding="utf-8"))
+        doc["name"] = "parity_joint"
+        doc["yaw"] = {"keys": [[0, -90.0, "joint"], [40, -60.0, "joint", None, 6], [70, -110.5, "joint", None, 12.5],
+                               [110, -20.0, "cubic"], [160, -45.0, "joint", None, 0], [200, 30.0, "joint", 4.5], [260, 10.0, "joint", -0.75, 8],
+                               [329, 55.0, "linear"]]}
+        (self.root / "timelines" / "parity_joint.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
         tl = parse_timeline(json.loads(src.read_text(encoding="utf-8")), path=src, start_search_dirs=starts)
         inputs = bake_inputs(tl)
         head = [l for l in render_baked(tl, inputs).splitlines() if l.startswith(("@setting", "@start"))]
@@ -530,6 +538,20 @@ def editor_script(c: Client, settle=lambda: None):
         for op in ({"op": "insert", "at": L // 2, "count": 5}, {"op": "delete", "from": max(1, L // 4), "to": max(1, L // 4) + 7},
                    {"op": "length", "length": L + 3}, {"op": "turn", "from": 1, "to": min(L - 1, 20), "rate": 1.5, "after": "shift"}):
             yield call(f"op slopes {name} {op['op']}", "POST", "/api/op", {"name": name, "doc": doc, "edits": sl, "op": op})
+        # every yaw key a joint (the editor's curve), some with their own widths, slopes smooth curves left (ignored)
+        # and a line said with its width, through an update and the operations
+        jt = copy.deepcopy(edits)
+        widths = {1: [None, 6], 2: [None, 2.5], 3: [None, 0], 4: [3.25], 5: [-1.5], 6: [0.5, 4]}
+        jt["yaw"] = [[k[0], k[1], "joint"] + widths.get(j, []) for j, k in enumerate(jt["yaw"])]
+        yield call(f"update joints {name}", "POST", "/api/update", {"name": name, "doc": doc, "edits": jt})
+        yield call(f"update bad joint {name}", "POST", "/api/update", {"name": name, "doc": doc, "edits": dict(edits, yaw=[[0, 1.0, "joint", None, -2]])})
+        q = max(1, L // 4)
+        for i, op in enumerate(({"op": "insert", "at": L // 2, "count": 5}, {"op": "insert", "at": 1, "count": 2},
+                                {"op": "insert", "at": jt["yaw"][min(2, len(jt["yaw"]) - 1)][0], "count": 3},
+                                {"op": "delete", "from": q, "to": q + 7}, {"op": "delete", "from": 1, "to": 4},
+                                {"op": "turn", "from": q, "to": q + 20, "rate": 2.5}, {"op": "turn", "from": q, "to": q + 30, "rate": -1.75, "after": "shift"},
+                                {"op": "turn", "from": 2 * q, "to": 2 * q + 15, "rate": 1, "shape": "smooth"}, {"op": "length", "length": L + 4})):
+            yield call(f"op joints {name} {i} {op['op']}", "POST", "/api/op", {"name": name, "doc": doc, "edits": jt, "op": op})
         yield call(f"op short key {name}", "POST", "/api/op", {"name": name, "doc": doc, "edits": dict(edits, yaw=[[0, 1.0]]),
                                                                "op": {"op": "insert", "at": 0, "count": 1}})
         yield call(f"update bad {name}", "POST", "/api/update", {"name": name, "doc": doc, "edits": dict(edits, yaw=[[0, 1.0, "nope"]])})
@@ -585,6 +607,15 @@ def editor_script(c: Client, settle=lambda: None):
                                 {"op": "turn", "from": q - 3, "to": q + 3, "rate": 0, "shape": "auto"},
                                 {"op": "turn", "from": 3, "to": q + 2, "rate": 0.5, "shape": "smooth"}]):
             yield call(f"op blocks {name} #{i} {op['op']}", "POST", "/api/op", {"name": name, "doc": doc, "edits": blocks, "op": op})
+        # A and D set by hand: joined and kept inside the timeline, carried along by the operations like held keys
+        L = int(edits["length"])
+        hand = dict(edits, ad_by_hand=[{"from": 3, "to": q}, {"from": 1, "to": 4}, {"from": q + 2, "to": q + 3}, {"from": L - 2, "to": L + 9},
+                                        {"from": 7, "to": 7}])
+        yield call(f"update by hand {name}", "POST", "/api/update", {"name": name, "doc": doc, "edits": hand})
+        for i, op in enumerate([{"op": "insert", "at": 2, "count": 3}, {"op": "insert", "at": q + 2, "count": 2},
+                                {"op": "delete", "from": 2, "to": q + 1}, {"op": "length", "length": L + 2},
+                                {"op": "length", "length": max(1, L // 2)}]):
+            yield call(f"op by hand {name} #{i} {op['op']}", "POST", "/api/op", {"name": name, "doc": doc, "edits": hand, "op": op})
         for i, op in enumerate(ops):
             yield (r := call(f"op {name} #{i} {op.get('op')}", "POST", "/api/op", {"name": name, "doc": doc, "edits": edits, "op": op}))
             out = json.loads(r[2])

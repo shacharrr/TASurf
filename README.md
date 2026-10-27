@@ -208,7 +208,7 @@ docs/design.md              determinism model, reset sequence, known limits, lat
 timelines/example_surf.json example timeline for surf_beginner
 tasurf/                     Python package (stdlib only, Python 3.10+)
   timeline.py               load + validate timelines
-  interp.py                 keyframe interpolation (hold / linear / smooth / cubic)
+  interp.py                 keyframe interpolation (hold / linear / smooth / cubic / joint)
   bake.py                   timeline -> per-tick baked file (+ a reader with the plugin's rules)
   runcsv.py                 read run CSVs, bit-exact comparison
   physics.py                reference air-movement model for sanity checks

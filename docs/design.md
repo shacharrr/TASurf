@@ -305,7 +305,28 @@ were. A cubic segment on the kept side whose slope came from keys beyond the edi
 into the key it meets the edit at. A smooth segment can't be cut into two of its kind, so the part that's
 kept is written out as one linear key per tick. (Until 2026-10-24 cubic segments were written out tick by
 tick too, which left a recording-like row of linear keys with small corners after every insert.) The tests check this bit for bit before the edit and
-to 1e-9 degrees after it, for every interpolation mode. Analysis per edit: the first tick whose input differs from the last run (`_first_difference`), a
+to 1e-9 degrees after it, for every interpolation mode. Insert holds the yaw over the new ticks with a joint
+segment whose ends are joints of width 0, which is exactly flat (until 2026-10-27 it was a `hold` segment,
+which the editor's Curve menu doesn't offer, and the keyframe after it couldn't have a joint). Where it's
+inserted at a key with a joint, `_pin`'s corner mode writes out the joint's ticks before the key instead of
+keeping the joint, and the key after the new ticks gets width 0 too (a non-joint key there: its joint
+dropped and the rate the joint had written in as its slope).
+
+A joint segment (straight lines with rounded joints at the keys, through every key) depends on keys a few
+segments away: each line is fitted to its neighbours' (six Jacobi passes on the condition that a segment's
+line, shifted by the half joints at its ends, arrives exactly at its next key), so an edit's influence fades
+within six segments and a fitted slope can be written into its key without changing anything else (the fit
+never reads keys' own slopes). `_joint_pin` writes the lines and joint widths of the joint segments within
+nine segments of a cut into their keys, so they no longer depend on what the edit changes. A joint key's
+slope counts only together with its width, and `_joint_pin` always writes the two together: a slope alone
+on a joint key is one a smooth curve left when the key became a joint, and is ignored (`_said_slope`). Keys
+keep their kind; the keys a cut adds are joints of width 0. A cut at a key keeps that key's joint (its
+outgoing line written in); a cut inside a segment gets one key, and only a joint the cut goes through has
+its kept ticks written out. The cut
+segment's straight part then runs between other ends, which can move its values in the last bits, so
+`_joint_pin` checks that every kept tick of that segment reaches the game as the same float32 (wrapped, as
+the baker writes it) and writes the kept ticks out if one doesn't (it hasn't happened in the tests). An
+insert in a joint segment adds about three keys. Analysis per edit: the first tick whose input differs from the last run (`_first_difference`), a
 free-flight estimate from that tick (`physics.estimate_free_flight`), and the best yaw per air tick
 (`physics.best_yaw`, closed form `c* = max(30 − A, 0)`, checked against a brute-force scan in the tests).
 

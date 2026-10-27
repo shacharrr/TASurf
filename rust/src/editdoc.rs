@@ -8,14 +8,16 @@
 //! comments) is kept as written. Parsing rules stay in timeline.rs.
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
 use crate::bake::{bake_inputs, read_baked, BakedFile, TickInput};
 use crate::buttons;
-use crate::interp::{key_slope, segment_slope, value_at, wrap_degrees, Interp, Key, INTERP_MODES};
+use crate::interp::{
+    joint_half, joint_rate, joint_slopes, key_slope, segment_slope, value_at, wrap_degrees, Interp, Key, INTERP_MODES, JOINT_PASSES,
+};
 use crate::py;
 use crate::timeline::{err, is_comment, parse_timeline, Res, Timeline, TlError};
 
@@ -125,7 +127,7 @@ fn with_fields(r: &Map<String, Value>, changes: &[(&str, Value)]) -> Map<String,
 }
 
 // --------------------------------------------------------------------------
-// track keys: [tick, value, interp] or [tick, value, interp, slope]
+// track keys: [tick, value, interp], [tick, value, interp, slope] or [..., slope or null, joint]
 
 #[derive(Clone, Debug)]
 pub struct TK {
@@ -134,16 +136,18 @@ pub struct TK {
     pub int: bool, // the value came in as a JSON integer and is passed on as one
     pub interp: String,
     pub slope: Option<f64>,
+    pub joint: Option<f64>,
+    pub joint_int: bool, // the joint width came in as a JSON integer
 }
 
 impl TK {
     fn new(tick: i64, value: f64, interp: &str) -> TK {
-        TK { tick, value, int: false, interp: interp.to_string(), slope: None }
+        TK { tick, value, int: false, interp: interp.to_string(), slope: None, joint: None, joint_int: false }
     }
 
     fn with_value(&self, tick: i64, value: Option<f64>) -> TK {
         match value {
-            Some(v) => TK { tick, value: v, int: false, interp: self.interp.clone(), slope: self.slope },
+            Some(v) => TK { tick, value: v, int: false, ..self.clone() },
             None => TK { tick, ..self.clone() },
         }
     }
@@ -155,8 +159,11 @@ impl TK {
             py::num(self.value)
         };
         let mut a = vec![ival(self.tick), v, Value::String(self.interp.clone())];
-        if let Some(s) = self.slope {
-            a.push(py::num(s));
+        if self.slope.is_some() || self.joint.is_some() {
+            a.push(self.slope.map_or(Value::Null, py::num));
+        }
+        if let Some(j) = self.joint {
+            a.push(if self.joint_int && j.fract() == 0.0 && j.abs() < 9e15 { ival(j as i64) } else { py::num(j) });
         }
         Value::Array(a)
     }
@@ -166,8 +173,8 @@ pub fn track_from(v: &Value) -> Res<Vec<TK>> {
     let list = v.as_array().ok_or_else(|| TlError(format!("'{}' object is not iterable", py::type_name(v))))?;
     list.iter()
         .map(|k| {
-            let a = k.as_array().filter(|a| a.len() == 3 || a.len() == 4).ok_or_else(|| {
-                TlError("a key is [tick, value, interp] or [tick, value, interp, slope]".into())
+            let a = k.as_array().filter(|a| (3..=5).contains(&a.len())).ok_or_else(|| {
+                TlError("a key is [tick, value, interp], [tick, value, interp, slope] or [tick, value, interp, slope, joint]".into())
             })?;
             Ok(TK {
                 tick: to_int(&a[0])?,
@@ -178,6 +185,11 @@ pub fn track_from(v: &Value) -> Res<Vec<TK>> {
                     Some(s) if !s.is_null() => Some(to_float(s)?),
                     _ => None,
                 },
+                joint: match a.get(4) {
+                    Some(s) if !s.is_null() => Some(to_float(s)?),
+                    _ => None,
+                },
+                joint_int: a.get(4).map_or(false, |j| j.is_i64() || j.is_u64()),
             })
         })
         .collect()
@@ -196,7 +208,7 @@ fn sorted_track(mut t: Vec<TK>) -> Vec<TK> {
 fn interp_keys(track: &[TK]) -> Vec<Key> {
     track
         .iter()
-        .map(|k| Key { slope: k.slope, ..Key::new(k.tick, k.value, Interp::parse(&k.interp).unwrap_or(Interp::Linear)) })
+        .map(|k| Key { slope: k.slope, joint: k.joint, ..Key::new(k.tick, k.value, Interp::parse(&k.interp).unwrap_or(Interp::Linear)) })
         .collect()
 }
 
@@ -239,6 +251,7 @@ fn curve_slope(track: &[TK], tick: i64, into: bool) -> f64 {
                     let s = (tick - k0.tick) as f64 / span;
                     (k1.value - k0.value) * 6.0 * s * (1.0 - s) / span
                 }
+                "joint" => joint_rate(&keys, i, tick),
                 _ => segment_slope(&keys, i, tick),
             };
         }
@@ -265,6 +278,11 @@ enum Side {
     Both,
 }
 
+/// Whether a key says a slope that counts (a joint key's only with its joint's width: interp.py's _said_slope).
+fn own_slope(k: &TK) -> bool {
+    k.slope.is_some() && (k.interp != "joint" || k.joint.is_some())
+}
+
 /// keys with a key at tick on the curve of source, such that the values on one
 /// side of it (Before: ticks <= tick, After: ticks >= tick, or Both) stay what
 /// source gives. A hold or linear segment just gets the key. A cubic segment is
@@ -276,6 +294,11 @@ enum Side {
 /// beyond. Before the first key and after the last the curve is flat; the new key
 /// there holds that value.
 fn pin(keys: &[TK], tick: Option<i64>, side: Side, source: &[TK]) -> Res<Vec<TK>> {
+    pin_with(keys, tick, side, source, false)
+}
+
+/// pin; corner (Before, for Insert): a cut at a key with a joint leaves no joint there (editdoc.py's _joint_pin).
+fn pin_with(keys: &[TK], tick: Option<i64>, side: Side, source: &[TK], corner: bool) -> Res<Vec<TK>> {
     let mut keys: Vec<TK> = keys.to_vec();
     let tick = match tick {
         Some(t) => t,
@@ -283,6 +306,11 @@ fn pin(keys: &[TK], tick: Option<i64>, side: Side, source: &[TK]) -> Res<Vec<TK>
     };
     if keys.is_empty() {
         return err("list index out of range");
+    }
+    let src_keys = interp_keys(source);
+    let at = src_keys.iter().position(|k| k.tick == tick);
+    if joint_cut_at(&src_keys, tick) || (corner && side == Side::Before && at.map_or(false, |a| joint_half(&src_keys, a) > 0.0)) {
+        return Ok(joint_pin(keys, tick, side, &src_keys, corner));
     }
     let exact = |t: i64, interp: &str| -> Res<TK> { Ok(TK::new(t, tvalue(source, t)?, interp)) };
     // segment keys[j] .. keys[j + 1], tick by tick
@@ -294,14 +322,18 @@ fn pin(keys: &[TK], tick: Option<i64>, side: Side, source: &[TK]) -> Res<Vec<TK>
         Ok(())
     }
     let src = interp_keys(source);
-    // key j says the slope cubic segments meet it with, as source has it
+    // key j says the slope cubic segments meet it with, as source has it (a joint key, where a cubic arrives, with
+    // its joint's width too: 0, without which the slope wouldn't count)
     fn freeze(keys: &mut [TK], j: usize, src: &[Key]) {
-        if keys[j].slope.is_none() {
+        if !own_slope(&keys[j]) {
             let s = match src.iter().position(|k| k.tick == keys[j].tick) {
                 Some(at) => key_slope(src, at),
                 None => key_slope(&interp_keys(keys), j),
             };
             keys[j].slope = Some(s);
+            if keys[j].interp == "joint" && keys[j].joint.is_none() {
+                keys[j].joint = Some(0.0);
+            }
         }
     }
     // a cubic segment's slopes come from the neighbouring keys (unless its keys give them)
@@ -375,6 +407,164 @@ fn pin(keys: &[TK], tick: Option<i64>, side: Side, source: &[TK]) -> Res<Vec<TK>
 // --------------------------------------------------------------------------
 // the normalised view and merging edits into the document
 
+const JOINT_ZONE: i64 = JOINT_PASSES as i64 + 3; // joint segments either side of a cut that say their line and width
+
+/// Whether a cut at tick is in a joint segment of src, or at a key one leaves from.
+fn joint_cut_at(src: &[Key], tick: i64) -> bool {
+    for i in 0..src.len().saturating_sub(1) {
+        if src[i].tick <= tick && tick < src[i + 1].tick {
+            return src[i].interp == Interp::Joint;
+        }
+    }
+    false
+}
+
+/// pin where the cut is in a joint segment of src, or at a key one leaves from (editdoc.py's _joint_pin): the
+/// keys it needs, and if any of the cut segment's ticks would reach the game as a different float32, its kept ticks
+/// written out instead.
+fn joint_pin(keys: Vec<TK>, tick: i64, side: Side, src: &[Key], corner: bool) -> Vec<TK> {
+    let out = joint_cut(&keys, tick, side, src, false, corner);
+    let seg = (0..src.len() - 1).find(|&i| src[i].tick <= tick && tick < src[i + 1].tick).unwrap_or(0);
+    // where the kept part before ends
+    let ends = match src.iter().position(|k| k.tick == tick) {
+        Some(a) if corner && joint_half(src, a) > 0.0 => a - 1,
+        _ => seg,
+    };
+    let lo = if side == Side::After { tick } else { src[ends].tick };
+    let hi = if side == Side::Before { tick } else { src[seg + 1].tick };
+    let cut = interp_keys(&out);
+    for t in lo..=hi {
+        let (a, b) = (value_at(&cut, t), value_at(src, t));
+        if py::float_to_bits(wrap_degrees(a)) != py::float_to_bits(wrap_degrees(b)) || py::float_to_bits(a) != py::float_to_bits(b) {
+            return joint_cut(&keys, tick, side, src, true, corner);
+        }
+    }
+    out
+}
+
+/// joint_pin's keys; spell: the kept ticks of the cut segment written out (editdoc.py's _joint_cut).
+fn joint_cut(keys: &[TK], tick: i64, side: Side, src: &[Key], spell: bool, corner: bool) -> Vec<TK> {
+    let mut by_tick: BTreeMap<i64, TK> = keys.iter().map(|k| (k.tick, k.clone())).collect();
+    let n = src.len() as i64;
+    let in_src = |t: i64| src.iter().any(|k| k.tick == t);
+    // the key at t: one src has keeps its kind; a new one is a joint without a joint (a corner)
+    let put = |by_tick: &mut BTreeMap<i64, TK>, t: i64| {
+        let keep = in_src(t);
+        by_tick
+            .entry(t)
+            .and_modify(|k| {
+                if !keep {
+                    k.interp = "joint".into();
+                }
+            })
+            .or_insert_with(|| {
+                let mut k = TK::new(t, value_at(src, t), "joint");
+                k.joint = Some(0.0);
+                k
+            });
+    };
+    // give a key a slope and a joint width it doesn't say yet
+    let setf = |k: &mut TK, slope: Option<f64>, joint: Option<f64>| {
+        if k.interp == "joint" && k.joint.is_none() {
+            k.slope = None; // a joint key's slope without a width doesn't count (src fits that line)
+        }
+        if k.slope.is_none() {
+            k.slope = slope;
+        }
+        if k.joint.is_none() {
+            k.joint = joint;
+        }
+    };
+    // the joint segments' lines and the joints' widths there
+    let freeze = |by_tick: &mut BTreeMap<i64, TK>, lo_seg: i64, hi_seg: i64, hi_key: i64| {
+        let (lo_seg, hi_seg) = (lo_seg.max(0), hi_seg.min(n - 2));
+        if hi_seg >= lo_seg {
+            // each with its joint's width, so the line counts
+            for (j, s) in joint_slopes(src, lo_seg as usize, hi_seg as usize) {
+                if let Some(k) = by_tick.get_mut(&src[j].tick) {
+                    setf(k, Some(s), Some(2.0 * joint_half(src, j)));
+                }
+            }
+        }
+        for i in lo_seg.max(1)..=hi_key.min(n - 2) {
+            let h = joint_half(src, i as usize);
+            if h > 0.0 {
+                if let Some(k) = by_tick.get_mut(&src[i as usize].tick) {
+                    setf(k, None, Some(2.0 * h));
+                }
+            }
+        }
+    };
+    let seg = (0..src.len() - 1).find(|&i| src[i].tick <= tick && tick < src[i + 1].tick).unwrap_or(0);
+    let (t0, t1) = (src[seg].tick, src[seg + 1].tick);
+    let at = src.iter().position(|k| k.tick == tick);
+    if side == Side::Before || side == Side::Both {
+        match at {
+            Some(at) if !(corner && joint_half(src, at) > 0.0) => {
+                if joint_half(src, at) > 0.0 {
+                    // its joint stays, with the line it had leaving (written in)
+                    freeze(&mut by_tick, at as i64 - JOINT_ZONE, at as i64, at as i64);
+                } else if at > 0 && src[at - 1].interp == Interp::Cubic {
+                    // a cubic arriving takes the line's slope: written in (no joint)
+                    if let Some(k) = by_tick.get_mut(&tick) {
+                        setf(k, Some(key_slope(src, at)), Some(0.0));
+                    }
+                }
+            }
+            _ => {
+                // inside a segment, or (corner) at a key whose joint goes: the end of the segment arriving there
+                let ends = at.map_or(seg, |a| a - 1);
+                let (u0, u1) = (src[ends].tick, src[ends + 1].tick);
+                freeze(&mut by_tick, ends as i64 - JOINT_ZONE, ends as i64, ends as i64);
+                let first = if spell {
+                    // from where the joint at the segment's start ends
+                    (u0 as f64 + joint_half(src, ends)).ceil() as i64
+                } else {
+                    // in the joint at its end: from where the straight part ends
+                    let b = u1 as f64 - joint_half(src, ends + 1);
+                    if tick as f64 > b {
+                        b.floor() as i64
+                    } else {
+                        tick
+                    }
+                };
+                for t in (u0 + 1).max(first)..=tick {
+                    put(&mut by_tick, t);
+                }
+                if at.is_some() {
+                    // the key: a corner (its slope, if it didn't count, goes)
+                    if let Some(k) = by_tick.get_mut(&tick) {
+                        if k.joint.is_none() {
+                            k.slope = None;
+                        }
+                        k.joint = Some(0.0);
+                        k.joint_int = false;
+                    }
+                }
+            }
+        }
+    }
+    if side == Side::After || side == Side::Both {
+        let first = if spell {
+            // up to where the joint at the segment's end starts
+            tick.max(((t1 as f64 - joint_half(src, seg + 1)).floor() as i64).min(t1 - 1))
+        } else {
+            // past the joint at its start
+            tick.max(((t0 as f64 + joint_half(src, seg)).ceil() as i64).min(t1 - 1))
+        };
+        for t in tick..first {
+            put(&mut by_tick, t);
+        }
+        put(&mut by_tick, first);
+        let line = joint_slopes(src, seg, seg)[&seg];
+        if let Some(k) = by_tick.get_mut(&first) {
+            setf(k, Some(line), Some(0.0));
+        }
+        freeze(&mut by_tick, seg as i64 + 1, seg as i64 + 1 + JOINT_ZONE, seg as i64 + 2 + JOINT_ZONE);
+    }
+    by_tick.into_values().collect()
+}
+
 fn range_out(key: &str, start: i64, end: i64, value: Option<f64>) -> Value {
     let mut r = Map::new();
     r.insert("key".into(), Value::String(key.to_string()));
@@ -391,8 +581,11 @@ fn keys_json(keys: &[Key]) -> Value {
         keys.iter()
             .map(|k| {
                 let mut a = vec![ival(k.tick), py::num(k.value), Value::String(k.interp.name().into())];
-                if let Some(s) = k.slope {
-                    a.push(py::num(s));
+                if k.slope.is_some() || k.joint.is_some() {
+                    a.push(k.slope.map_or(Value::Null, py::num));
+                }
+                if let Some(j) = k.joint {
+                    a.push(py::num(j));
                 }
                 Value::Array(a)
             })
@@ -454,6 +647,15 @@ pub fn normalized(tl: &Timeline) -> Value {
         });
         m.insert("turns".into(), Value::Array(blocks.collect()));
     }
+    if !tl.ad_by_hand.is_empty() {
+        let spans = tl.ad_by_hand.iter().map(|&(a, b)| {
+            let mut o = Map::new();
+            o.insert("from".into(), ival(a));
+            o.insert("to".into(), ival(b));
+            Value::Object(o)
+        });
+        m.insert("ad_by_hand".into(), Value::Array(spans.collect()));
+    }
     Value::Object(m)
 }
 
@@ -481,13 +683,25 @@ fn track_edit(keys: &Value, what: &str) -> Res<Value> {
             Some(s) if !s.is_null() => Some(to_float(s)?),
             _ => None,
         };
+        let joint = match a.get(4) {
+            Some(s) if !s.is_null() => Some(to_float(s)?),
+            _ => None,
+        };
         if !INTERP_MODES.contains(&interp.as_str()) {
             return err(format!("{}: bad interp {}", what, py::repr_str(&interp)));
         }
+        if let Some(j) = joint {
+            if !(j >= 0.0) {
+                return err(format!("{}: a joint's width can't be negative", what));
+            }
+        }
         // no rounding: imported values are exact float32s
         let mut key = vec![ival(tick), py::num(value), Value::String(interp)];
-        if let Some(s) = slope {
-            key.push(py::num(s));
+        if slope.is_some() || joint.is_some() {
+            key.push(slope.map_or(Value::Null, py::num));
+        }
+        if let Some(j) = joint {
+            key.push(py::num(j));
         }
         out.push(Value::Array(key));
     }
@@ -636,6 +850,39 @@ pub fn apply_edits(doc: &Value, edits: &Value) -> Res<Value> {
             new.insert("turns".into(), Value::Array(out));
         }
     }
+    if let Some(h) = edits.get("ad_by_hand") {
+        // the editor's ticks whose A and D were set by hand: joined, inside the timeline
+        let length = to_int(need(&new, "length")?)?;
+        let mut rs = Vec::new();
+        if py_truthy(h) {
+            for r in list_of_objects(Some(h))? {
+                rs.push((to_int(need(r, "from")?)?, to_int(need(r, "to")?)?));
+            }
+        }
+        rs.sort_by_key(|x| x.0);
+        let mut spans: Vec<(i64, i64)> = Vec::new();
+        for (a, b) in rs {
+            let (a, b) = (a.max(0), b.min(length));
+            if b <= a {
+                continue;
+            }
+            match spans.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => spans.push((a, b)),
+            }
+        }
+        if spans.is_empty() {
+            new.shift_remove("ad_by_hand");
+        } else {
+            let out = spans.iter().map(|&(a, b)| {
+                let mut o = Map::new();
+                o.insert("from".into(), ival(a));
+                o.insert("to".into(), ival(b));
+                Value::Object(o)
+            });
+            new.insert("ad_by_hand".into(), Value::Array(out.collect()));
+        }
+    }
     Ok(Value::Object(new))
 }
 
@@ -667,6 +914,7 @@ pub struct Edits {
     pub strafe: Vec<Range>,
     pub view_pitch: Option<Vec<TK>>,
     pub turns: Vec<Range>, // the editor's curve turns, by name
+    pub ad_by_hand: Vec<Range>, // the editor's ticks whose A and D were set by hand
 }
 
 impl Edits {
@@ -695,7 +943,11 @@ impl Edits {
             Some(s) if py_truthy(s) => list_of_objects(Some(s))?.into_iter().cloned().collect(),
             _ => Vec::new(),
         };
-        Ok(Edits { length, yaw, pitch, keys, strafe, view_pitch, turns })
+        let ad_by_hand = match d.get("ad_by_hand") {
+            Some(s) if py_truthy(s) => list_of_objects(Some(s))?.into_iter().cloned().collect(),
+            _ => Vec::new(),
+        };
+        Ok(Edits { length, yaw, pitch, keys, strafe, view_pitch, turns, ad_by_hand })
     }
 
     pub fn to_json(&self) -> Value {
@@ -707,6 +959,7 @@ impl Edits {
         m.insert("strafe".into(), Value::Array(self.strafe.iter().cloned().map(Value::Object).collect()));
         m.insert("view_pitch".into(), self.view_pitch.as_ref().map_or(Value::Null, |p| track_json(p)));
         m.insert("turns".into(), Value::Array(self.turns.iter().cloned().map(Value::Object).collect()));
+        m.insert("ad_by_hand".into(), Value::Array(self.ad_by_hand.iter().cloned().map(Value::Object).collect()));
         Value::Object(m)
     }
 }
@@ -873,15 +1126,49 @@ pub fn insert_ticks(edits: &Edits, at: i64, count: i64) -> Res<Edits> {
         if at == length {
             return Ok(tr.to_vec()); // past the last key the value holds already
         }
-        let pinned = pin(tr, Some(at), Side::Both, tr)?;
-        let here = pinned.iter().find(|k| k.tick == at).and_then(|k| k.slope);
-        let mut out: Vec<TK> =
-            pinned.into_iter().map(|k| if k.tick >= at { k.with_value(k.tick + count, None) } else { k }).collect();
-        // hold tick at's value over the new ticks (a cubic arriving there meets it with the slope it had)
-        let mut hold = TK::new(at, tvalue(tr, at)?, "hold");
-        hold.slope = here;
-        out.push(hold);
-        Ok(sorted_track(out))
+        let (first, last) = match (tr.first(), tr.last()) {
+            (Some(f), Some(l)) => (f.tick, l.tick),
+            _ => return err("list index out of range"),
+        };
+        if at > last {
+            return Ok(tr.to_vec());
+        }
+        if at < first {
+            return Ok(tr.iter().map(|k| k.with_value(k.tick + count, None)).collect()); // and before the first
+        }
+        let before = pin_with(tr, Some(at), Side::Before, tr, true)?; // the curve up to tick at, with no joint there
+        let after = pin(tr, Some(at), Side::After, tr)?; // and from it on, moved by count
+        let here_slope = before.iter().find(|k| k.tick == at).and_then(|k| k.slope);
+        let head: Vec<TK> = before.into_iter().filter(|k| k.tick < at).collect();
+        // where the held ticks end, no joint either: a joint key's width 0 (its slope, if it didn't count, goes);
+        // another key's joint dropped, the curve leaving it with the rate the joint had there
+        let rate = match after.iter().position(|k| k.tick == at) {
+            Some(j) if after[j].interp != "joint" && after[j].joint.is_some() => Some(key_slope(&interp_keys(&after), j)),
+            _ => None,
+        };
+        let mut tail: Vec<TK> = after.into_iter().filter(|k| k.tick >= at).map(|k| k.with_value(k.tick + count, None)).collect();
+        if let Some(k) = tail.first_mut() {
+            if k.interp == "joint" {
+                if k.joint.is_none() {
+                    k.slope = None;
+                }
+                k.joint = Some(0.0);
+                k.joint_int = false;
+            } else if k.joint.is_some() {
+                k.slope = rate;
+                k.joint = None;
+                k.joint_int = false;
+            }
+        }
+        // tick at's value held over the new ticks: a joint segment with corners at both ends, so exactly flat (a
+        // cubic arriving there meets it with the slope it had)
+        let mut flat = TK::new(at, tvalue(tr, at)?, "joint");
+        flat.slope = if head.last().map_or(false, |k| k.interp == "cubic") { here_slope } else { None };
+        flat.joint = Some(0.0);
+        let mut out = head;
+        out.push(flat);
+        out.extend(tail);
+        Ok(out)
     };
     let src = at.min(length - 1);
     let ranges = |rs: &[Range]| -> Res<Vec<Range>> {
@@ -898,6 +1185,22 @@ pub fn insert_ticks(edits: &Edits, at: i64, count: i64) -> Res<Edits> {
         }
         Ok(out)
     };
+    // auto-strafe and turns: the new ticks aren't part of one (one they're inside is split round them)
+    let blocks = |rs: &[Range]| -> Res<Vec<Range>> {
+        let mut out = Vec::new();
+        for r in rs {
+            let (f, t) = (to_int(rget(r, "from")?)?, to_int(rget(r, "to")?)?);
+            if f < at && at < t {
+                out.push(with_fields(r, &[("to", ival(at))]));
+                out.push(with_fields(r, &[("from", ival(at + count)), ("to", ival(t + count))]));
+            } else if f >= at {
+                out.push(with_fields(r, &[("from", ival(f + count)), ("to", ival(t + count))]));
+            } else {
+                out.push(r.clone());
+            }
+        }
+        Ok(out)
+    };
     Ok(Edits {
         length: length + count,
         yaw: track(&edits.yaw)?,
@@ -906,12 +1209,13 @@ pub fn insert_ticks(edits: &Edits, at: i64, count: i64) -> Res<Edits> {
             None => None,
         },
         keys: merge_ranges(&ranges(&edits.keys)?)?,
-        strafe: merge_strafe(&ranges(&edits.strafe)?)?,
+        strafe: merge_strafe(&blocks(&edits.strafe)?)?,
         view_pitch: match &edits.view_pitch {
             Some(p) => Some(track(p)?),
             None => None,
         },
-        turns: ranges(&edits.turns)?,
+        turns: blocks(&edits.turns)?,
+        ad_by_hand: ranges(&edits.ad_by_hand)?,
     })
 }
 
@@ -967,6 +1271,7 @@ pub fn delete_ticks(edits: &Edits, start: i64, end: i64) -> Res<Edits> {
             None => None,
         },
         turns: ranges(&edits.turns)?,
+        ad_by_hand: ranges(&edits.ad_by_hand)?,
     })
 }
 
@@ -1154,6 +1459,7 @@ pub fn splice_recording(
         strafe,
         view_pitch: new_view,
         turns: cut_strafe(&edits.turns, at, length.max(rec.len() as i64)),
+        ad_by_hand: cut_strafe(&edits.ad_by_hand, at, length.max(rec.len() as i64)),
     })
 }
 
@@ -1266,11 +1572,22 @@ pub fn make_turn(
         };
         let delta = y1 - tvalue(yaw, last)?;
         let mut pinned = pin(yaw, Some(first), Side::Before, yaw)?; // the curve before the turn stays as it was
+        if let Some(cut) = pinned.iter().find(|k| k.tick == first) {
+            if cut.joint.map_or(false, |j| j != 0.0) {
+                // a joint kept there: the turn starts at it, leaving with the rate the joint has
+                let mut t0 = TK::new(first, y0, "cubic");
+                t0.slope = cut.slope;
+                t0.joint = cut.joint;
+                t0.joint_int = cut.joint_int;
+                turn[0] = t0;
+            }
+        }
         let shift = after_s == "shift";
         if shift {
             pinned = pin(&pinned, Some(last), Side::After, yaw)?; // and after it, moved by delta
         }
         let end_interp = segment_interp(&pinned, last);
+        let kept = pinned.iter().find(|k| k.tick == last).map(|k| (k.slope, k.joint, k.joint_int));
         let mut o: Vec<TK> = pinned
             .into_iter()
             .filter(|k| !(first <= k.tick && k.tick <= last))
@@ -1279,7 +1596,8 @@ pub fn make_turn(
         if !shift {
             // the curve on to the next key leaves with the slope it had; that key keeps its own
             if let Some(nxt) = o.iter_mut().find(|k| k.tick > last) {
-                if nxt.slope.is_none() {
+                if nxt.slope.is_none() && nxt.interp != "joint" {
+                    // (a joint line leaving: the cubic takes its slope)
                     nxt.slope = Some(curve_slope(yaw, nxt.tick, false));
                 }
             }
@@ -1291,6 +1609,12 @@ pub fn make_turn(
             let mut end = TK::new(last, y1, &end_interp);
             if end_interp == "cubic" {
                 end.slope = Some(s1);
+            } else if end_interp == "joint" {
+                if let Some((s, j, ji)) = kept {
+                    end.slope = s;
+                    end.joint = j;
+                    end.joint_int = ji;
+                }
             }
             o.push(end);
         }

@@ -15,8 +15,8 @@ from pathlib import Path
 from tasurf import buttons
 from tasurf.bake import TickInput, BakedFile, bake_inputs, read_baked, render_baked
 from tasurf.camera import CAM_MARGIN
-from tasurf.editdoc import (apply_edits, apply_op, format_json, freeze_strafe, normalized, recording_to_timeline,
-                            splice_recording)
+from tasurf.editdoc import (apply_edits, apply_op, delete_ticks, format_json, freeze_strafe, insert_ticks, normalized,
+                            recording_to_timeline, splice_recording)
 from tasurf.editor import Editor, make_server
 from tasurf.physics import (AirParams, GroundParams, best_yaw, check_run, estimate_free_flight, ground_accelerate,
                             predict_air_tick, smooth_swing_input, speed_after_air_accel, straight_sidemove, strafe_yaw,
@@ -483,6 +483,41 @@ class AutoStrafeTest(unittest.TestCase):
             parse_timeline(dict(OPS, turns=[{"from": 40, "to": 70, "rate": 1, "shape": "auto"}]))
         self.assertIn("turns[0].shape", str(e.exception))
 
+    def test_new_ticks_are_not_part_of_a_turn_or_auto_strafe(self):
+        # inserted inside a block, it's split round them; at its first tick they come before it; after it, it stays
+        edits = {k: v for k, v in normalized(parse_timeline(OPS)).items() if k in ("length", "yaw", "pitch", "keys", "strafe")}
+        new, _ = apply_op(edits, {"op": "turn", "from": 40, "to": 69, "rate": -1.25, "shape": "smooth"})
+        turn = {"rate": -1.25, "shape": "smooth"}
+        self.assertEqual(apply_op(new, {"op": "insert", "at": 50, "count": 5})[0]["turns"],
+                         [dict(turn, **{"from": 40, "to": 50}), dict(turn, **{"from": 55, "to": 75})])
+        self.assertEqual(apply_op(new, {"op": "insert", "at": 40, "count": 5})[0]["turns"], [dict(turn, **{"from": 45, "to": 75})])
+        self.assertEqual(apply_op(new, {"op": "insert", "at": 70, "count": 5})[0]["turns"], [dict(turn, **{"from": 40, "to": 70})])
+        auto, _ = apply_op(edits, {"op": "turn", "from": 30, "to": 49, "rate": 0, "shape": "auto"})
+        split = apply_op(auto, {"op": "insert", "at": 35, "count": 4})[0]
+        self.assertEqual([(r["from"], r["to"]) for r in split["strafe"]], [(30, 35), (39, 54)])
+        longer = apply_op(dict(auto, strafe=[dict(auto["strafe"][0], to=120)]), {"op": "length", "length": 125})[0]
+        self.assertEqual([(r["from"], r["to"]) for r in longer["strafe"]], [(30, 120)])  # nor the ticks added at the end
+
+    def test_a_and_d_set_by_hand_are_kept_with_the_timeline(self):
+        # the editor's ticks whose A and D you set by hand (following the yaw leaves them): saved, moved by the ops
+        # like held keys, not baked
+        edits = {k: v for k, v in normalized(parse_timeline(OPS)).items() if k in ("length", "yaw", "pitch", "keys", "strafe")}
+        hand = dict(edits, ad_by_hand=[{"from": 20, "to": 30}, {"from": 50, "to": 55}])
+        doc = apply_edits(OPS, dict(hand, ad_by_hand=[{"from": 50, "to": 55}, {"from": 20, "to": 30}, {"from": 28, "to": 33},
+                                                      {"from": 118, "to": 140}, {"from": 9, "to": 9}]))
+        self.assertEqual(doc["ad_by_hand"], [{"from": 20, "to": 33}, {"from": 50, "to": 55}, {"from": 118, "to": 120}])  # joined, inside
+        tl = parse_timeline(doc)
+        self.assertEqual(normalized(tl)["ad_by_hand"], doc["ad_by_hand"])
+        plain = dict(doc); plain.pop("ad_by_hand")
+        self.assertEqual(render_baked(tl, bake_inputs(tl)), render_baked(parse_timeline(plain), bake_inputs(parse_timeline(plain))))
+        self.assertNotIn("ad_by_hand", apply_edits(doc, {"ad_by_hand": []}))
+        self.assertEqual(apply_op(hand, {"op": "insert", "at": 25, "count": 4})[0]["ad_by_hand"],
+                         [{"from": 20, "to": 34}, {"from": 54, "to": 59}])  # the copies of a tick set by hand are too
+        self.assertEqual(apply_op(hand, {"op": "delete", "from": 25, "to": 52})[0]["ad_by_hand"], [{"from": 20, "to": 25}, {"from": 25, "to": 28}])
+        with self.assertRaises(TimelineError) as e:
+            parse_timeline(dict(OPS, ad_by_hand=[{"from": 40, "to": 200}]))
+        self.assertIn("ad_by_hand[0]", str(e.exception))
+
     def test_straight_ranges_parse_bake_and_turn(self):
         doc = dict(OPS, strafe=[{"from": 40, "to": 70, "heading": 87.5}, [80, 90, 3.5]])
         tl = parse_timeline(doc)
@@ -789,8 +824,9 @@ class SlopeTest(unittest.TestCase):
         self.assertEqual([k.slope for k in tl.yaw], [None, 0.75, -0.5, None])
         self.assertEqual(normalized(tl)["yaw"], [[0, 90.0, "linear"], [30, 120.0, "cubic", 0.75], [60, 100.0, "cubic", -0.5],
                                                  [100, 150.0, "linear"]])
-        for bad, why in (([[0, 1.0, "cubic", "x"]], "keys[0][3]"), ([[0, 1.0, "cubic", 1.0, 2]], "expected [tick, value]"),
-                         ([{"tick": 0, "value": 1.0, "slope": None}], "keys[0].slope")):
+        for bad, why in (([[0, 1.0, "cubic", "x"]], "keys[0][3]"), ([[0, 1.0, "cubic", 1.0, 2, 3]], "expected [tick, value]"),
+                         ([{"tick": 0, "value": 1.0, "slope": None}], "keys[0].slope"),
+                         ([[0, 1.0, "joint", None, -1]], "can't be negative")):
             with self.assertRaises(TimelineError) as e:
                 parse_timeline(dict(OPS, yaw={"keys": bad}))
             self.assertIn(why, str(e.exception))
@@ -1094,6 +1130,80 @@ class ApiTest(unittest.TestCase):
         self.assertIn('"superseded"', preview)  # a preview a newer request replaced
         for needle in ('"ready %s"', '"why %s"', '"mode %s"', '"bot %s"', '"state idle"', '"version %s"', '"map %s"'):
             self.assertIn(needle, src)  # the heartbeat fields game_status reads
+
+
+class JointEditTest(unittest.TestCase):
+    """Edits next to joint segments keep the rest of the curve bit for bit (a joint segment's line depends on the
+    keys a few segments away, so the kept side has its lines and widths written in; see _pin)."""
+
+    from tasurf.editdoc import _kl as kl
+    YAW = [kl(0, 0.0, "joint"), kl(13, -30.0, "joint"), kl(30, -80.0, "joint"), kl(41, -20.0, "joint", None, 6.0),
+           kl(70, 40.0, "joint"), kl(77, 41.0, "cubic"), kl(95, 10.0, "joint"), kl(120, 90.0, "joint"),
+           kl(131, 60.0, "linear"), kl(150, 70.0, "joint"), kl(171, 20.0, "joint", None, 0.0), kl(190, -5.0, "joint"),
+           kl(199, 0.0, "linear")]
+    N = 200
+
+    def curve(self, yaw, n):
+        from tasurf.editdoc import _keys
+        from tasurf.interp import sample
+        return [float_to_bits(v) for v in sample(_keys(yaw), n)]
+
+    def test_a_cut_keeps_its_side_whatever_happens_on_the_other(self):
+        from tasurf.editdoc import _pin
+        orig = self.curve(self.YAW, self.N)
+        for side in ("before", "after", "both"):
+            for t in range(1, self.N - 1, 2):
+                pinned = _pin(self.YAW, t, side, self.YAW)
+                if side == "before":
+                    moved, kept = [[k[0], k[1] + (17.0 if k[0] > t else 0.0), *k[2:]] for k in pinned], range(t + 1)
+                elif side == "after":
+                    moved, kept = [[k[0], k[1] + (17.0 if k[0] < t else 0.0), *k[2:]] for k in pinned], range(t, self.N)
+                else:
+                    moved, kept = pinned, range(self.N)
+                got = self.curve(moved, self.N)
+                self.assertEqual([got[x] for x in kept], [orig[x] for x in kept], f"{side} {t}")
+
+    def test_slopes_a_smooth_curve_left_on_joint_keys_dont_count_and_cuts_stay_exact(self):
+        from tasurf.editdoc import _kl, _pin
+        left = [list(k) for k in self.YAW]
+        for i, s in ((0, 4.0), (1, 9.5), (2, -1.0), (6, -7.0), (7, 3.3)):  # joint keys that were smooth curves
+            left[i] = _kl(*left[i][:3], s)
+        orig = self.curve(self.YAW, self.N)
+        self.assertEqual(self.curve(left, self.N), orig)
+        for side in ("before", "after"):
+            for t in range(1, self.N - 1, 3):
+                pinned = _pin(left, t, side, left)
+                moved = [[k[0], k[1] + (17.0 if (k[0] > t if side == "before" else k[0] < t) else 0.0), *k[2:]] for k in pinned]
+                kept = range(t + 1) if side == "before" else range(t, self.N)
+                got = self.curve(moved, self.N)
+                self.assertEqual([got[x] for x in kept], [orig[x] for x in kept], f"{side} {t}")
+
+    def test_insert_holds_the_yaw_on_a_joint_segment_with_corners(self):
+        # not a hold (a kind the Curve menu doesn't offer): a joint segment with width-0 joints at both ends, so
+        # the keys there have joints on both sides and their Joint width can be set
+        from tasurf.editdoc import _kfields
+        edits = {"length": self.N, "yaw": self.YAW, "pitch": None, "keys": [], "strafe": []}
+        for at in (20, 41, 100, 150):
+            out = insert_ticks(edits, at, 6)["yaw"]
+            self.assertNotIn("hold", [k[2] for k in out], at)
+            start, end = next(k for k in out if k[0] == at), next(k for k in out if k[0] == at + 6)
+            self.assertEqual((start[2], _kfields(start)[1]), ("joint", 0.0), at)
+            self.assertEqual((end[2], _kfields(end)[1]), ("joint", 0.0), at)
+
+    def test_inserting_deleting_and_turning_keep_the_rest(self):
+        edits = {"length": self.N, "yaw": self.YAW, "pitch": None, "keys": [], "strafe": []}
+        orig = self.curve(self.YAW, self.N)
+        for at in range(0, self.N, 7):
+            got = self.curve(insert_ticks(edits, at, 5)["yaw"], self.N + 5)
+            self.assertEqual(got, orig[:at] + [orig[min(at, self.N - 1)]] * 5 + orig[at:], f"insert at {at}")
+        for start in range(0, self.N - 20, 7):
+            got = self.curve(delete_ticks(edits, start, start + 13)["yaw"], self.N - 13)
+            self.assertEqual(got, orig[:start] + orig[start + 13:], f"delete from {start}")
+        for first in range(5, 180, 12):
+            for after in ("keep", "shift"):
+                got = self.curve(apply_op(edits, {"op": "turn", "from": first, "to": first + 12, "rate": 1.5, "after": after})[0]["yaw"],
+                                 self.N)
+                self.assertEqual(got[:first], orig[:first], f"turn at {first}, {after}")
 
 
 if __name__ == "__main__":

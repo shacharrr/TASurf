@@ -6,4 +6,4 @@ records. The game engine is always the ground truth for movement; nothing here
 simulates movement except the optional reference-physics sanity check.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"

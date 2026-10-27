@@ -545,8 +545,9 @@
   <div id="tlpop" class="pop legend" hidden>
     <span class="grp">Yaw</span>
     <div class="li"><i></i><i class="sw" style="color:#e8ecf2"></i><span><b>The yaw curve</b>, each keyframe a dot in the colour of the curve leaving it:
-      <i class="dot" style="background:#d8dde6"></i>linear <i class="dot" style="background:#a98bff"></i>hold <i class="dot" style="background:#58d68d"></i>smooth
-      <i class="dot" style="background:#5aa9ff"></i>cubic. A yellow band while you drag: the stretch the drag changes.</span></div>
+      <i class="dot" style="background:#4fd1c5"></i>joint (straight, rounded at the keyframes) <i class="dot" style="background:#5aa9ff"></i>smooth curve
+      <i class="dot" style="background:#d8dde6"></i>linear <i class="dot" style="background:#a98bff"></i>hold <i class="dot" style="background:#58d68d"></i>ease.
+      A yellow band while you drag: the stretch the drag changes.</span></div>
     <div class="li"><i></i><i class="sw band" style="background:rgba(88,214,141,.35)"></i><span><b>Auto-strafe</b>: the game aims the keys there. The strip on top
       says which keys; the line in their colour is the yaw the game played. On a straight range the game picks A or D each
       tick: the strip and the A and D rows show the side it played (the bar held there goes faint), and the yaw it played is green.</span></div>
@@ -563,6 +564,9 @@
     <span class="grp">Keys</span>
     <div class="li"><i></i><i class="sw band" style="background:#ffb347"></i><span><b>A bar</b> holds the key on those ticks; a paler one holds it at its own
       speed. Where one movement key hands over to another, dragging the edge moves both (Alt: just one).</span></div>
+    <div class="li"><i></i><i class="sw" style="color:rgba(232,236,242,.75)"></i><span><b>A line under A and D</b>: ticks where you set A or D
+      by hand. Moving the yaw doesn't change them there (A and D follow the yaw, Settings); <b>Shift+A</b> lets them follow
+      again on the selected ticks.</span></div>
     <label class="li"><input type="checkbox" data-vis="tlOther"><i class="sw band" style="background:#8a93a3"></i><span><b>Buttons that don't move
       you</b>: +left and +right (the yaw does the turning) and unnamed bits such as the scoreboard, as recordings hold them.</span></label>
     <span class="grp">Speed (horizontal, u/s)</span>
@@ -920,7 +924,7 @@
       <div class="setsec">Saving</div>
       <label class="chk"><input id="set_autosave" type="checkbox">Auto-save every 5 minutes, when there are changes</label>
       <div class="setsec">Editing</div>
-      <label class="chk"><input id="set_follow" type="checkbox">A and D follow the yaw: moving a yaw keyframe holds A where the yaw turns left and D where it turns right</label>
+      <label class="chk"><input id="set_follow" type="checkbox">A and D follow the yaw: moving a yaw keyframe holds A where the yaw turns left and D where it turns right (not where you set them by hand: Shift+A lets those follow again)</label>
       <label class="chk"><input id="set_ends" type="checkbox">After auto-strafe the yaw goes on from where it ended: the tick after a range starts at the yaw the game played on its last tick (a flat end moves with it), instead of snapping back to the curve</label>
       <div class="setsec">Camera <span class="muted">this timeline's: saved with it, so its renders always look the same</span></div>
       <div class="note">What replays and renders look along. The run is the same whichever you pick.</div>
@@ -1311,8 +1315,68 @@ function showErrors() {
 }
 
 // ---------------------------------------------------------------- interpolation (same as tasurf/interp.py)
+// joint: straight lines (a steady turn rate) with rounded joints at the keys, through every key exactly; each line
+// fitted to its neighbours' so the joints meet them without a kink (interp.py's joint_* functions, the same numbers)
+const JOINT_PASSES = 6, REACH = 3 / 16;
+const jointSeg = (keys, j) => j >= 0 && j < keys.length - 1 && keys[j][2] === "joint";
+const keySlope = k => (k[3] !== undefined && k[3] !== null ? k[3] : null);
+const keyJoint = k => (k[4] !== undefined && k[4] !== null ? k[4] : null);
+// the slope a key says; a joint key's line counts only with its width (one alone is a smooth curve's, left over)
+const saidSlope = k => (k[2] !== "joint" || keyJoint(k) !== null ? keySlope(k) : null);
+function jointAuto(keys, i) { return Math.min(keys[i][0] - keys[i - 1][0], keys[i + 1][0] - keys[i][0]) / 4; }
+function jointHalf(keys, i) {  // half the joint's width at key i (ticks), 0 where there's none
+  if (!(i > 0 && i < keys.length - 1) || !jointSeg(keys, i - 1)) return 0;
+  const k = keys[i], w = keyJoint(k);
+  if (!jointSeg(keys, i)) return keySlope(k) !== null && w !== null ? Math.max(0, w) / 2 : 0;
+  return w !== null ? Math.max(0, w) / 2 : jointAuto(keys, i);
+}
+const lineOut = (keys, j, m) => (jointSeg(keys, j) ? m.get(j) : keySlope(keys[j]));
+function jointSlopes(keys, lo, hi) {  // each joint segment's line, lo..hi
+  const last = keys.length - 2, P = JOINT_PASSES;
+  let m = new Map();
+  for (let j = Math.max(0, lo - P); j <= Math.min(last, hi + P); j++) if (jointSeg(keys, j)) m.set(j, (keys[j + 1][1] - keys[j][1]) / (keys[j + 1][0] - keys[j][0]));
+  for (let p = 1; p <= P; p++) {
+    const nxt = new Map();
+    for (let j = Math.max(0, lo - P + p); j <= Math.min(last, hi + P - p); j++) {
+      if (!jointSeg(keys, j)) continue;
+      const span = keys[j + 1][0] - keys[j][0], hl = jointHalf(keys, j), hr = jointHalf(keys, j + 1);
+      const left = hl > 0 ? m.get(j - 1) : 0, right = hr > 0 ? lineOut(keys, j + 1, m) : 0, den = span - REACH * hl - REACH * hr;
+      nxt.set(j, den <= 0.25 * span ? m.get(j) : (keys[j + 1][1] - keys[j][1] - REACH * hl * left - REACH * hr * right) / den);
+    }
+    m = nxt;
+  }
+  const out = new Map();
+  for (let j = Math.max(0, lo); j <= Math.min(last, hi); j++) if (jointSeg(keys, j)) out.set(j, saidSlope(keys[j]) !== null ? saidSlope(keys[j]) : m.get(j));
+  return out;
+}
+function jointPart(ml, mr, h, d) {  // the yaw from a joint's key to d ticks after it, inside the joint
+  const w = 2 * h, u = (d + h) / w;
+  return w * (ml * u + (mr - ml) * (u * u * u * (1 - 0.5 * u))) - w * (ml * 0.5 + (mr - ml) * 0.09375);
+}
+function jointValue(keys, i, t, m) {
+  if (t === keys[i][0]) return keys[i][1];  // the key itself (even where the next key's joint reaches past it)
+  const k0 = keys[i], k1 = keys[i + 1], hl = jointHalf(keys, i), hr = jointHalf(keys, i + 1), a = k0[0] + hl, b = k1[0] - hr;
+  if (t < a) return k0[1] + jointPart(m.get(i - 1), m.get(i), hl, t - k0[0]);
+  if (t > b) return k1[1] + jointPart(m.get(i), lineOut(keys, i + 1, m), hr, t - k1[0]);
+  const ya = hl > 0 ? k0[1] + jointPart(m.get(i - 1), m.get(i), hl, hl) : k0[1];
+  const yb = hr > 0 ? k1[1] + jointPart(m.get(i), lineOut(keys, i + 1, m), hr, -hr) : k1[1];
+  return b > a ? ya + (yb - ya) * ((t - a) / (b - a)) : ya;
+}
+function jointRate(keys, i, t) {  // the slope of joint segment i at tick t (its ends included)
+  const m = jointSlopes(keys, i - 1, i + 1), k0 = keys[i], k1 = keys[i + 1], hl = jointHalf(keys, i), hr = jointHalf(keys, i + 1);
+  const a = k0[0] + hl, b = k1[0] - hr;
+  if (t < a || t > b) {
+    const [ml, mr, h, d] = t < a ? [m.get(i - 1), m.get(i), hl, t - k0[0]] : [m.get(i), lineOut(keys, i + 1, m), hr, t - k1[0]];
+    const u = (d + h) / (2 * h);
+    return ml + (mr - ml) * (u * u * (3 - 2 * u));
+  }
+  return b > a ? (jointValue(keys, i, b, m) - jointValue(keys, i, a, m)) / (b - a) : m.get(i);
+}
 function slope(keys, i) {
-  if (keys[i][3] !== undefined && keys[i][3] !== null) return keys[i][3];  // the key says its slope
+  if (jointHalf(keys, i) > 0) { const ml = jointSlopes(keys, i - 1, i - 1).get(i - 1); return ml + (keySlope(keys[i]) - ml) * 0.5; }
+  if (saidSlope(keys[i]) !== null) return saidSlope(keys[i]);  // the key says its slope
+  if (jointSeg(keys, i - 1)) return jointSlopes(keys, i - 1, i - 1).get(i - 1);  // a joint's line arriving or leaving
+  if (jointSeg(keys, i)) return jointSlopes(keys, i, i).get(i);
   if (keys.length < 2) return 0;
   let a, b;
   if (i === 0) { a = keys[0]; b = keys[1]; }
@@ -1330,6 +1394,7 @@ function valueAt(keys, t) {
   switch (k0[2]) {
     case "hold": return k0[1];
     case "smooth": return k0[1] + (k1[1] - k0[1]) * (s * s * (3 - 2 * s));
+    case "joint": return jointValue(keys, lo, t, jointSlopes(keys, lo - 1, lo + 1));
     case "cubic": {
       const m0 = slope(keys, lo) * span, m1 = slope(keys, lo + 1) * span, s2 = s * s, s3 = s2 * s;
       return (2 * s3 - 3 * s2 + 1) * k0[1] + (s3 - 2 * s2 + s) * m0 + (-2 * s3 + 3 * s2) * k1[1] + (s3 - s2) * m1;
@@ -1339,8 +1404,8 @@ function valueAt(keys, t) {
 }
 
 // ---------------------------------------------------------------- editing the normalised timeline
-function snapshot() { return JSON.stringify({ yaw: S.norm.yaw, pitch: S.norm.pitch, keys: S.norm.keys, length: S.norm.length, strafe: S.norm.strafe, view_pitch: S.norm.view_pitch || null, autobhop: !!S.norm.autobhop, camera_smoothing: cameraMode(), turns: S.norm.turns || [] }); }
-function currentEdits() { return { length: S.norm.length, yaw: S.norm.yaw, pitch: S.norm.pitch, keys: S.norm.keys, strafe: S.norm.strafe || [], view_pitch: S.norm.view_pitch || null, autobhop: !!S.norm.autobhop, camera_smoothing: cameraMode(), turns: S.norm.turns || [] }; }
+function snapshot() { return JSON.stringify({ yaw: S.norm.yaw, pitch: S.norm.pitch, keys: S.norm.keys, length: S.norm.length, strafe: S.norm.strafe, view_pitch: S.norm.view_pitch || null, autobhop: !!S.norm.autobhop, camera_smoothing: cameraMode(), turns: S.norm.turns || [], ad_by_hand: S.norm.ad_by_hand || [] }); }
+function currentEdits() { return { length: S.norm.length, yaw: S.norm.yaw, pitch: S.norm.pitch, keys: S.norm.keys, strafe: S.norm.strafe || [], view_pitch: S.norm.view_pitch || null, autobhop: !!S.norm.autobhop, camera_smoothing: cameraMode(), turns: S.norm.turns || [], ad_by_hand: S.norm.ad_by_hand || [] }; }
 function strafeAt(t) { return (S.norm.strafe || []).find(r => r.from <= t && t < r.to) || null; }
 // The turn blocks: auto-strafe ranges, and the curve turns Turn made (S.norm.turns, which only name them: the yaw
 // keyframes are what plays). { kind: "auto" | "curve", from, to (exclusive), r: the range or the turn }
@@ -1374,10 +1439,11 @@ function removeBlock(b) {
     let p = -1, n = -1;
     k0.forEach((k, i) => { if (k[0] < b.from) p = i; if (n < 0 && k[0] > last) n = i; });
     const kept = k0.filter(k => k[0] < b.from || k[0] > last);
-    if (!kept.length) kept.push([0, Math.round(yawAt(b.from) * 1e4) / 1e4, "cubic"]);
+    if (!kept.length) kept.push([0, Math.round(yawAt(b.from) * 1e4) / 1e4, defaultInterp()]);
     const P = p >= 0 ? kept.find(k => k[0] === k0[p][0]) : null, N = n >= 0 ? kept.find(k => k[0] === k0[n][0]) : null;
-    if (P) { P[2] = "cubic"; P[3] = r6(slopeIn(k0, p)); }
-    if (N) N[3] = r6(slopeOut(k0, n));
+    if (P && P[2] === "joint") { if (keyJoint(P) !== null) P[3] = null; else P.length = 3; }  // a joint: its line fitted again
+    else if (P) { P[2] = "cubic"; P.length = Math.min(P.length, 4); P[3] = r6(slopeIn(k0, p)); }
+    if (N && N[2] !== "joint") N[3] = r6(slopeOut(k0, n));  // a joint's line leaving: the cubic takes its slope
     S.norm.yaw = kept;
     S.norm.turns = (S.norm.turns || []).filter(x => x !== b.r);
     followKeys(b.from, b.to);
@@ -1391,8 +1457,9 @@ function undo() { if (!S.undo.length) return; S.redo.push(snapshot()); restore(S
 function redo() { if (!S.redo.length) return; S.undo.push(snapshot()); restore(S.redo.pop()); }
 
 function yawKeyIndexAt(t) { return S.norm.yaw.findIndex(k => k[0] === t); }
-// New yaw keyframes are cubic: the yaw stays smooth and differentiable (no steps, no corners) through them.
-function defaultInterp() { return "cubic"; }
+// New yaw keyframes are joints: straight lines between keyframes, rounded at each one, so the yaw goes exactly
+// through them with no steps and no corners.
+function defaultInterp() { return "joint"; }
 function setYawKey(t, value, interp) {
   const keys = S.norm.yaw, i = yawKeyIndexAt(t);
   if (i >= 0) { keys[i][1] = value; if (interp) keys[i][2] = interp; }
@@ -1547,7 +1614,7 @@ async function applyOp(op) {
   S.undo.push(before); if (S.undo.length > 200) S.undo.shift(); S.redo = [];
   S.seq++; S.applied = S.seq;
   Object.assign(S.norm, { length: r.norm.length, yaw: r.norm.yaw, pitch: r.norm.pitch, keys: r.norm.keys, strafe: r.norm.strafe || [],
-    view_pitch: r.norm.view_pitch || null, turns: r.norm.turns || [] });
+    view_pitch: r.norm.view_pitch || null, turns: r.norm.turns || [], ad_by_hand: r.norm.ad_by_hand || [] });
   inputsChanged();
   S.doc = r.doc; S.preview = r.preview; S.analysis = r.analysis; S.warnings = r.warnings || []; S.hash = r.hash || null;
   S.error = null; S.dirty = true; S.sel = null;
@@ -2066,7 +2133,7 @@ function drawYawRow(ctx, row, L, R, t0, t1, pxPerTick) {
       const gap = Math.min(i > 0 ? x - tx(keys[i - 1][0]) : Infinity, i < keys.length - 1 ? tx(keys[i + 1][0]) - x : Infinity);
       if (!selected && gap < 10 && x - lastX < 14) return;
       lastX = x;
-      ctx.fillStyle = selected ? "#ffd166" : (k[2] === "hold" ? "#a98bff" : k[2] === "smooth" ? "#58d68d" : k[2] === "cubic" ? "#5aa9ff" : "#d8dde6");
+      ctx.fillStyle = selected ? "#ffd166" : INTERP_COLOR[k[2]] || INTERP_COLOR.linear;
       ctx.beginPath(); ctx.arc(x, y, selected ? 4.5 : gap < 10 ? 2 : 3, 0, Math.PI * 2); ctx.fill();
     });
   } else {
@@ -2119,6 +2186,15 @@ function drawKeyRow(ctx, row, L, R) {
     ctx.fillStyle = color; ctx.globalAlpha = r.value !== undefined ? 0.55 : 0.85;
     ctx.fillRect(x0, row.y + 3, Math.max(1, x1 - x0), row.h - 6); ctx.globalAlpha = 1;
     if (S.sel && S.sel.type === "range" && S.sel.range === r) sel = [x0, x1];
+  }
+  // A and D set by hand: a line under the row, where following the yaw leaves them
+  if (row.key === "moveleft" || row.key === "moveright") {
+    ctx.fillStyle = "rgba(232,236,242,.75)";
+    for (const h of S.norm.ad_by_hand || []) {
+      const x0 = tx(h.from), x1 = tx(h.to);
+      if (x1 < L || x0 > R) continue;
+      ctx.fillRect(x0, row.y + row.h - 3, Math.max(1, x1 - x0), 2);
+    }
   }
   // Keys the game presses itself: A and D on a straight auto-strafe range (it picks the side each tick), and jump with
   // auto bhop (it lets a held jump go in the air). There the bar held goes faint and the ticks the game pressed the key
@@ -2297,7 +2373,7 @@ TL.el.addEventListener("mousedown", e => {
     if (hit) {
       pushUndo(); S.sel = { type: "range", range: hit.range };
       TL.drag = { type: "range", part: hit.part, range: hit.range, t0: t, from0: hit.range.from, to0: hit.range.to, moved: false,
-        edge: hit.part === "body" ? null : edgeGrab(hit.range, hit.part) };
+        edge: hit.part === "body" ? null : edgeGrab(hit.range, hit.part), keys0: keysNow() };
       render(); return;
     }
     TL.drag = { type: "create", key: row.key, t0: t, t1: t };
@@ -2318,7 +2394,8 @@ function rowHelp(row) {  // a row's label, hovered: what the row is (Timeline �
   if (row.type === "yaw") return "Yaw: where the run looks. Drag a keyframe to move it (Alt: only its yaw), double-click to add one" + more;
   if (row.type === "look") return "Look: the pitch replays show. Dashed grey: the run's own" + more;
   if (row.type === "key") return `${LABEL[row.key] || row.key}: held where its bars are. Drag a bar or its edges, drag empty space to add one, ` +
-    "double-click to toggle a tick" + (row.key === "moveleft" || row.key === "moveright" ? ". Bright on straight auto-strafe: where the game pressed it" : "") +
+    "double-click to toggle a tick" + (row.key === "moveleft" || row.key === "moveright" ? ". Bright on straight auto-strafe: where the game pressed it. " +
+      "A line under it: set by hand, so moving the yaw doesn't change it there (Shift+A: it follows again)" : "") +
     (row.key === "jump" && S.norm && S.norm.autobhop ? ". Bright with auto bhop: where the game jumped" : "") + more;
   if (row.type === "speed") return "Speed: horizontal, u/s, of the last run, the prediction and the run before. Drag to select ticks" + more;
   return "";
@@ -2359,12 +2436,15 @@ window.addEventListener("mouseup", e => {
     else if (!d.moved && d.shift) S.range = [Math.min(d.from, t), Math.max(d.from, t)];  // Shift+click: from the cursor
     else if (!d.moved) S.range = null;  // a click just clears the selection (only the ruler moves the cursor)
   }
-  else if (d.type === "yawkey" || d.type === "range") { if (d.moved) { if (d.type === "range") mergeRanges(); changed(); } else S.undo.pop(); }
+  else if (d.type === "yawkey" || d.type === "range") {
+    if (d.moved) { if (d.type === "range") { mergeRanges(); markByHand(d.keys0); } changed(); } else S.undo.pop();
+  }
   else if (d.type === "create" && d.t1 !== d.t0) {
     pushUndo();
+    const before = keysNow();
     const a = Math.min(d.t0, d.t1), b = Math.max(d.t0, d.t1) + 1, [lo, hi] = freeSpan(d.key, a, null);
     S.norm.keys.push({ key: d.key, from: Math.max(a, lo), to: Math.min(b, heldAt(d.key, a) ? b : hi) });
-    mergeRanges(); changed();
+    mergeRanges(); markByHand(before); changed();
   }
   render();
 });
@@ -2377,7 +2457,7 @@ TL.el.addEventListener("dblclick", e => {
     pushUndo(); setYawKey(t, Math.round(yawAt(t) * 1e4) / 1e4); S.sel = { type: "yaw", index: yawKeyIndexAt(t) }; changed();
   }
   else if (row.type === "look") { pushUndo(); setViewKey(t, Math.round(viewPitchAt(t) * 1e4) / 1e4); changed(); }
-  else if (row.type === "key") { pushUndo(); toggleKey(row.key, t); changed(); }
+  else if (row.type === "key") { pushUndo(); const before = keysNow(); toggleKey(row.key, t); markByHand(before); changed(); }
 });
 TL.el.addEventListener("wheel", e => {
   if (!S.norm) return; e.preventDefault();
@@ -2646,7 +2726,7 @@ function centerOnTick() {
 // inputs last played (the fresh preview, else the last run). Drag one along the path to move it to another
 // tick, or a keyframe's arrow to turn its yaw (Shift: ten times finer). The path holds still while you
 // drag; the next preview shows where the change takes the run.
-const INTERP_COLOR = { hold: "#a98bff", smooth: "#58d68d", cubic: "#5aa9ff", linear: "#d8dde6" };
+const INTERP_COLOR = { hold: "#a98bff", smooth: "#58d68d", cubic: "#5aa9ff", linear: "#d8dde6", joint: "#4fd1c5" };
 const PM = { hover: null, drag: null, ver: 0, hits: [] };  // ver: goes up with every edit (the 3D view rebuilds its marks)
 function markPath() { return newestPath(); }
 function pathMarks(path) {
@@ -2768,21 +2848,22 @@ function markDrop() {
   PM.ver++; render();
 }
 // ---------------------------------------------------------------- moving a yaw keyframe smoothly
-// Dragging a yaw keyframe (its arrow on the path, or the key on the yaw row) moves just that key. The curve from
-// the keyframe before it to the one after becomes cubic through it, meeting the rest with the slopes the curve had
-// at those two keys (they say their slopes), so there are no corners or steps: the yaw stays smooth and
-// differentiable, and beyond those two keys nothing changes. A flat end (the curve holding one yaw to the last
-// key, as ticks Insert added at the end) follows the key, so the run ends at the yaw you turned to.
+// Dragging a yaw keyframe (its arrow on the path, or the key on the yaw row) moves just that key. A joint keyframe
+// just moves: the joint curve follows through it. Otherwise the curve from the keyframe before it to the one after
+// becomes cubic through it, meeting the rest with the slopes the curve had at those two keys (they say their
+// slopes), so there are no corners or steps: the yaw stays smooth and differentiable, and beyond those two keys
+// nothing changes. A flat end (the curve holding one yaw to the last key, as ticks Insert added at the end)
+// follows the key, so the run ends at the yaw you turned to.
 const BEND = { window: null };  // the stretch a drag changes, while it goes on
 function slopeIn(keys, j) {  // the slope the curve arrives at key j with
   if (j === 0) return slopeOut(keys, 0);
   const p = keys[j - 1], k = keys[j];
-  return p[2] === "linear" ? (k[1] - p[1]) / (k[0] - p[0]) : p[2] === "cubic" ? slope(keys, j) : 0;
+  return p[2] === "linear" ? (k[1] - p[1]) / (k[0] - p[0]) : p[2] === "cubic" ? slope(keys, j) : p[2] === "joint" ? jointRate(keys, j - 1, k[0]) : 0;
 }
 function slopeOut(keys, j) {  // the slope the curve leaves key j with
   if (j === keys.length - 1) return j > 0 ? slopeIn(keys, j) : 0;
   const k = keys[j], n = keys[j + 1];
-  return k[2] === "linear" ? (n[1] - k[1]) / (n[0] - k[0]) : k[2] === "cubic" ? slope(keys, j) : 0;
+  return k[2] === "linear" ? (n[1] - k[1]) / (n[0] - k[0]) : k[2] === "cubic" ? slope(keys, j) : k[2] === "joint" ? jointRate(keys, j, k[0]) : 0;
 }
 function bendStart(keys, i) {
   const t = keys[i][0], L = S.norm.length;
@@ -2793,23 +2874,20 @@ function bendStart(keys, i) {
   // m: the curve's slope there, which it keeps; ranges0: the keys as they were, which A and D follow the yaw from
   return { keys0: keys.map(k => k.slice()), i, v0: keys[i][1], m, ranges0: S.norm.keys.map(r => ({ ...r })) };
 }
-// Smooth: the yaw through the keyframes of ticks t0..t1 made smooth and differentiable, every one cubic (no steps
-// from hold, no corners from linear, no stops from smooth), with the slopes its neighbours give. Where it meets
-// curve that stays as it was, the key there keeps the slope the curve has there, so that join has no corner
-// either (a step just outside stays a step). Keys from a drag lose their slopes inside the stretch.
+// Smooth: the yaw through the keyframes of ticks t0..t1 made joints (straight lines, rounded at each keyframe):
+// no steps from hold, no corners from linear, no stops from smooth, exactly through every keyframe. The lines
+// edits wrote in and the cubics' slopes go; a keyframe's own joint width stays.
 function smoothYaw(t0, t1) {
-  const keys = S.norm.yaw, n = keys.length, k0 = keys.map(k => k.slice()), r6 = v => Math.round(v * 1e6) / 1e6;
+  const keys = S.norm.yaw, n = keys.length;
   if (n < 2) return;
   let a = 0, b = n - 1;  // the segments from key a to key b
   for (let i = 0; i < n; i++) if (keys[i][0] <= t0) a = i;
   for (let i = n - 1; i >= 0; i--) if (keys[i][0] >= t1) b = i;
   if (b <= a) b = Math.min(n - 1, a + 1);
   for (let i = a; i <= b; i++) {
-    if (i < b) keys[i][2] = "cubic";
-    if (i > a && i < b) keys[i].length = 3;
+    if (i < b) keys[i][2] = "joint";
+    if (i < b || keys[i][2] === "joint") { if (keyJoint(keys[i]) !== null) keys[i][3] = null; else keys[i].length = 3; }
   }
-  if (a > 0) keys[a][3] = r6(slopeIn(k0, a)); else keys[a].length = 3;
-  if (b < n - 1) keys[b][3] = r6(slopeOut(k0, b)); else keys[b].length = 3;
 }
 // the keys with key i at tick, delta degrees turned, the curve around it bent; and the stretch that changed
 function bendKeys(b, tick, delta) {
@@ -2820,12 +2898,22 @@ function bendKeys(b, tick, delta) {
   // the key: everything after it turns by the same change, so the run ends at the yaw you turned to.
   const flatEnd = c < n && K.slice(c).every(k => Math.abs(k[1] - K[c][1]) < 1e-6 && !k[3]);
   if (flatEnd) for (let j = i + 1; j < n; j++) K[j][1] = r4(K[j][1] + delta);
-  // the stretch from key a to key c all cubic, the keys inside with the slopes their neighbours give (the dragged one:
-  // the slope the curve had there); its end keys keep the slopes the curve has there, so it meets the rest smoothly
+  // a joint keyframe just moves: the lines and joints round it follow, through every key. The lines an edit wrote in
+  // near it (to keep a part exactly) go back to being fitted.
+  if (K[i][2] === "joint") {
+    for (let j = Math.max(0, i - JOINT_PASSES - 3); j <= Math.min(n - 1, i + JOINT_PASSES + 3); j++) {
+      if (K[j][2] === "joint" && keySlope(K[j]) !== null) { if (keyJoint(K[j]) !== null) K[j][3] = null; else K[j].length = 3; }
+    }
+    return { keys: K, window: [K[Math.max(0, i - 2)][0], flatEnd ? S.norm.length - 1 : K[Math.min(n - 1, i + 2)][0]] };
+  }
+  // the stretch from key a to key c a smooth curve through the dragged key (a segment that's a joint stays one, and
+  // the kinds a keyframe can't be set to, from recordings and edits, become smooth curves), the dragged key with the
+  // slope the curve had there; its end keys keep the slopes the curve has there (a joint's own line stays its own),
+  // so it meets the rest smoothly
   const lo = Math.max(0, a), hi = Math.min(n - 1, c);
-  for (let j = lo; j <= hi; j++) { if (j < hi) K[j][2] = "cubic"; if (j > lo && j < hi) K[j].length = 3; }
-  if (a >= 0) K[a][3] = r4(slopeIn(b.keys0, a) * 100) / 100;
-  if (c < n) K[c][3] = r4(slopeOut(b.keys0, c) * 100) / 100;
+  for (let j = lo; j <= hi; j++) { if (j < hi && K[j][2] !== "joint") K[j][2] = "cubic"; if (j > lo && j < hi) K[j].length = 3; }
+  if (a >= 0 && K[a][2] !== "joint") K[a][3] = r4(slopeIn(b.keys0, a) * 100) / 100;
+  if (c < n && K[c][2] !== "joint") K[c][3] = r4(slopeOut(b.keys0, c) * 100) / 100;
   if (hi > lo) K[i][3] = r4(b.m * 100) / 100;
   return { keys: K, window: [a >= 0 ? K[a][0] : tick, flatEnd ? S.norm.length - 1 : c < n ? K[c][0] : tick] };
 }
@@ -2843,7 +2931,7 @@ function bendDrag(d) {
 // The yaw keyframe at tick t set to value (added there if there's none), as a drag would: the curve between its
 // neighbours smooth through it. Then A and D follow the yaw there. Returns the stretch that changed.
 function setYawSmooth(t, value) {
-  if (yawKeyIndexAt(t) < 0) setYawKey(t, Math.round(yawAt(t) * 1e4) / 1e4, "cubic");
+  if (yawKeyIndexAt(t) < 0) setYawKey(t, Math.round(yawAt(t) * 1e4) / 1e4, defaultInterp());
   const i = yawKeyIndexAt(t), b = bendStart(S.norm.yaw, i);
   const { keys, window } = bendKeys(b, t, Math.round((value - b.v0) * 1e4) / 1e4);
   keys.forEach((k, j) => { const o = S.norm.yaw[j]; o.length = 0; o.push(...k); });
@@ -2852,14 +2940,14 @@ function setYawSmooth(t, value) {
   return window;
 }
 // A and D follow the yaw (Settings): over ticks a..b, a tick that turns left (the yaw goes up) holds A and one that
-// turns right holds D, the other side key let go there. Ticks that don't turn, and auto-strafe ranges (the game
-// picks there), keep what they have; remove a key afterwards to turn without one.
-function followKeys(a, b) {
-  if (!SETTINGS.followKeys || !S.norm) return;
+// turns right holds D, the other side key let go there. Ticks that don't turn, auto-strafe ranges (the game picks
+// there) and ticks whose A or D you set by hand keep what they have. force: even with the setting off.
+function followKeys(a, b, force) {
+  if ((!SETTINGS.followKeys && !force) || !S.norm) return;
   a = Math.max(1, Math.floor(a)); b = Math.min(S.norm.length - 1, Math.ceil(b));
   let changedAny = false;
   for (let t = a; t <= b; t++) {
-    if (strafeAt(t)) continue;
+    if (strafeAt(t) || byHandAt(t)) continue;
     const turn = yawAt(t) - yawAt(t - 1);
     if (Math.abs(turn) < 1e-4) continue;
     const want = turn > 0 ? "moveleft" : "moveright", other = turn > 0 ? "moveright" : "moveleft";
@@ -2890,12 +2978,61 @@ function followStrafeEnds() {
     if (flat) after.forEach(k => { k[1] = Math.round((k[1] + y - cur) * 1e4) / 1e4; });
     else {
       const i = keys.findIndex(k => k[0] === t);
-      if (i >= 0) { keys[i][1] = y; keys[i][2] = "cubic"; keys[i].length = 3; }
-      else { keys.push([t, y, "cubic"]); keys.sort((a, b) => a[0] - b[0]); }
+      if (i >= 0) {
+        keys[i][1] = y;
+        if (keys[i][2] !== "joint" && keys[i][2] !== "cubic") keys[i][2] = defaultInterp();
+        if (keyJoint(keys[i]) !== null) keys[i][3] = null; else keys[i].length = 3;
+      }
+      else { keys.push([t, y, defaultInterp()]); keys.sort((a, b) => a[0] - b[0]); }
     }
     moved++;
   }
   if (moved) { S.sel = null; changed(); status(`the yaw after ${moved > 1 ? moved + " auto-strafe ranges" : "auto-strafe"} now goes on from where it ended`, ""); }
+}
+// A and D set by hand (S.norm.ad_by_hand: [from, to) spans, saved with the timeline): following the yaw leaves them.
+// A hand edit of the keys (toggling a tick, a bar drawn, dragged or deleted) marks the ticks whose A or D it changed;
+// Shift+A lets them follow the yaw again.
+function byHandAt(t) { return (S.norm.ad_by_hand || []).some(h => h.from <= t && t < h.to); }
+function adBits(keys) {  // per tick: 1 A held, 2 D held
+  const n = S.norm.length, m = new Uint8Array(n);
+  for (const r of keys) {
+    const bit = r.key === "moveleft" ? 1 : r.key === "moveright" ? 2 : 0;
+    if (bit) for (let t = Math.max(0, r.from); t < Math.min(n, r.to); t++) m[t] |= bit;
+  }
+  return m;
+}
+function setByHand(spans) {  // sorted and joined
+  const out = [];
+  for (const h of spans.filter(h => h.to > h.from).sort((a, b) => a.from - b.from)) {
+    const last = out[out.length - 1];
+    if (last && h.from <= last.to) last.to = Math.max(last.to, h.to); else out.push({ from: h.from, to: h.to });
+  }
+  S.norm.ad_by_hand = out;
+}
+const keysNow = () => S.norm.keys.map(r => ({ ...r }));
+function markByHand(before) {  // after a hand edit of the keys (before: the keys it began from)
+  const a = adBits(before), b = adBits(S.norm.keys), add = [];
+  for (let t = 0; t < a.length; t++) {
+    if (a[t] === b[t]) continue;
+    let u = t + 1;
+    while (u < a.length && a[u] !== b[u]) u++;
+    add.push({ from: t, to: u }); t = u;
+  }
+  if (add.length) setByHand([...(S.norm.ad_by_hand || []), ...add]);
+}
+function followAgain() {  // A and D follow the yaw again over the selected ticks (or the cursor's)
+  const [a, b] = S.range ? [S.range[0], S.range[1]] : [S.tick, S.tick];
+  pushUndo();
+  const out = [];
+  for (const h of S.norm.ad_by_hand || []) {
+    if (h.to <= a || h.from > b) { out.push(h); continue; }
+    if (h.from < a) out.push({ from: h.from, to: a });
+    if (h.to > b + 1) out.push({ from: b + 1, to: h.to });
+  }
+  S.norm.ad_by_hand = out;
+  followKeys(a, b, true);
+  changed();
+  status(a === b ? `A and D follow the yaw again at tick ${a}` : `A and D follow the yaw again on ticks ${a}–${b}`, "good");
 }
 function cutKeyAt(key, t) {  // let go of key on tick t (the ranges around it stay)
   const out = [];
@@ -2977,7 +3114,8 @@ INS.innerHTML =
   insGroup("yaw", "Yaw",
     insRow("Angle", `<span class="field"><input id="yawin" type="number" step="0.01" title="The yaw at this tick: editing it sets a keyframe"><span class="u">°</span></span>` +
       `<button class="kf" id="yawkf"></button><span id="yawkey" class="muted ell kfword"></span>`) +
-    insRow("Curve", `<select id="interp" title="Curve: how the yaw goes on to the next keyframe. Linear and hold come only from older timelines"><option value="cubic">smooth curve</option><option value="smooth" disabled>ease (stops here)</option><option value="linear" disabled>linear (a corner)</option><option value="hold" disabled>hold (a step)</option></select><button id="smoothbtn" title="Smooth: one smooth curve through the selected keyframes (all of them, without a selection)">Smooth</button>`) +
+    insRow("Curve", `<select id="interp" title="Curve: how the yaw goes on to the next keyframe. Joint: a straight line (a steady turn rate), rounded at the keyframes; smooth curve: one curve through them"><option value="joint">joint</option><option value="cubic">smooth curve</option></select><button id="smoothbtn" title="Smooth: joints through the selected keyframes (all of them, without a selection): straight lines, rounded at each keyframe">Smooth</button>`) +
+    insRow("Joint", `<span class="field"><input id="jointin" type="number" step="1" min="0" title="Joint: how many ticks the turn rate takes to change at this keyframe, half before it and half after (0: a corner). Empty: automatic"><span class="u">ticks</span></span><span id="jointtxt" class="muted ell"></span>`) +
     insRow("Best", `<span id="besttxt" class="ro ell grow1"></span><button id="usebest" title="Set the yaw to the one that gains the most speed (B)">Use</button>`) +
     insRow("Turn", `<span id="strafeTxt" class="ell grow1"></span>` +
       `<button id="turnedit" title="Edit: change it in the Turn dialog (T)">Edit…</button>` +
@@ -3033,10 +3171,30 @@ $("smoothbtn").onclick = () => {
   const [t0, t1] = S.range || [0, S.norm.length - 1], before = JSON.stringify(S.norm.yaw);
   pushUndo(); smoothYaw(t0, t1);
   if (JSON.stringify(S.norm.yaw) === before) { S.undo.pop(); status(`the yaw is smooth already ${S.range ? "there" : "everywhere"}`); return; }
-  status(`yaw smoothed ${S.range ? `over ticks ${t0}–${t1}` : "everywhere"}: cubic through the keyframes, no steps or corners`);
+  status(`yaw smoothed ${S.range ? `over ticks ${t0}–${t1}` : "everywhere"}: straight lines rounded at each keyframe, no steps or corners`);
   changed();
 };
-$("interp").onchange = e => { const i = yawKeyIndexAt(yawTick()); if (i < 0) return; pushUndo(); S.norm.yaw[i][2] = e.target.value; changed(); };
+$("interp").onchange = e => {
+  const i = yawKeyIndexAt(yawTick()); if (i < 0 || !e.target.value) return;
+  pushUndo();
+  const k = S.norm.yaw[i];
+  k[2] = e.target.value;
+  if (keyJoint(k) !== null) k[3] = null; else k.length = 3;  // a slope meant for the other kind of curve goes; a joint's width stays
+  changed();
+};
+// the joint's width at the selected keyframe: empty for automatic; at most the shorter segment beside it
+$("jointin").onchange = e => {
+  const keys = S.norm.yaw, i = yawKeyIndexAt(yawTick()); if (i < 0) return;
+  const k = keys[i], raw = e.target.value.trim();
+  let w = raw === "" ? null : Math.max(0, parseFloat(raw));
+  if (w !== null && !isFinite(w)) return;
+  if (w !== null && i > 0 && i < keys.length - 1) w = Math.min(w, keys[i][0] - keys[i - 1][0], keys[i + 1][0] - keys[i][0]);
+  pushUndo();
+  const own = k[2] === "joint" ? null : keySlope(k);  // a joint's line is fitted again; a cubic keeps its slope
+  if (w === null) { if (own !== null) k.length = 4; else k.length = 3; }
+  else { k[3] = own; k[4] = Math.round(w * 100) / 100; }
+  changed();
+};
 // the diamond: a keyframe here (click: remove it) or not (click: add one, at the value the curve has here)
 $("yawkf").onclick = () => {
   const t = yawTick(), i = yawKeyIndexAt(t);
@@ -3140,7 +3298,17 @@ function renderInspector() {
   insText("yawkey", (ki >= 0 ? "keyframe" : "on the curve") + (yt !== t ? ` · tick ${yt}` : ""),
     yt !== t ? `The selected ${S.sel.type === "yaw" ? "keyframe" : "block"}, at tick ${yt} (the cursor is at ${t}); clear the selection (a click on empty space) for the cursor's` : "");
   $("interp").disabled = ki < 0;
-  if (ki >= 0) $("interp").value = S.norm.yaw[ki][2]; else $("interp").value = defaultInterp(yt);
+  const kind = ki >= 0 ? S.norm.yaw[ki][2] : defaultInterp(yt);
+  $("interp").value = kind;
+  if ($("interp").value !== kind) $("interp").selectedIndex = -1;  // a key from a recording or an edit (linear, hold, ease)
+  $("interp").title = ki >= 0 && $("interp").selectedIndex < 0
+    ? `This keyframe's curve is ${({ linear: "linear (from a recording or an edit)", hold: "hold (a step)", smooth: "ease (it stops here)" })[kind] || kind}: pick joint or smooth curve to change it`
+    : "Curve: how the yaw goes on to the next keyframe. Joint: a straight line (a steady turn rate), rounded at the keyframes; smooth curve: one curve through them";
+  const jk = ki >= 0 && jointSeg(S.norm.yaw, ki - 1) && jointSeg(S.norm.yaw, ki);  // a joint here: its width
+  $("jointin").disabled = !jk;
+  if (document.activeElement !== $("jointin")) $("jointin").value = jk && keyJoint(S.norm.yaw[ki]) !== null ? keyJoint(S.norm.yaw[ki]) : "";
+  $("jointin").placeholder = jk ? String(Math.round(2 * jointAuto(S.norm.yaw, ki) * 10) / 10) : "";
+  insText("jointtxt", jk ? (keyJoint(S.norm.yaw[ki]) !== null ? "set here" : "automatic") : ki >= 0 ? "where two joint segments meet" : "", "");
   insHTML("sum_yaw", `${yaw.toFixed(2)}°${ki >= 0 ? `<span class="kfmark">${icon("diamond-filled")}</span>` : ""}${yt !== t ? ` <span class="muted">· tick ${yt}</span>` : ""}`);
   const b = bestAt(yt);
   $("usebest").disabled = !b;
@@ -3478,7 +3646,10 @@ function renderTransport() {
   const r = pvCurrent() ? S.pv : S.run;
   const speed = r && S.tick < r.hspeed.length ? ` · ${r.hspeed[S.tick].toFixed(0)} u/s` : "";
   $("tcinfo").textContent = `tick ${S.tick} / ${S.norm.length - 1}${speed}`;
-  $("tpplay").innerHTML = icon(PLAY.on ? "pause" : "play");
+  // the icon only when it changes: redrawn every tick, the one under the mouse would be gone by the time a click
+  // ends, and the click (pause) would be lost
+  const shows = PLAY.on ? "pause" : "play";
+  if ($("tpplay").dataset.shows !== shows) { $("tpplay").innerHTML = icon(shows); $("tpplay").dataset.shows = shows; }
   $("tploop").classList.toggle("on", PLAY.loop);
 }
 $("tpplay").onclick = () => togglePlay();
@@ -4470,6 +4641,7 @@ const ACTIONS = [
   ["moveleft", "Toggle A at the cursor", "A", () => toggleAt("moveleft"), true],
   ["back", "Toggle S at the cursor", "S", () => toggleAt("back"), true],
   ["moveright", "Toggle D at the cursor", "D", () => toggleAt("moveright"), true],
+  ["adfollow", "A and D follow the yaw again (the selected ticks, or the cursor's): where you set them by hand", "Shift+A", () => followAgain()],
   ["jump", "Toggle jump at the cursor", "Space", () => toggleAt("jump"), true],
   ["duck", "Toggle duck at the cursor", "C", () => toggleAt("duck"), true],
   ["play", "Play or pause", "Shift+Space", () => togglePlay()],
@@ -4479,7 +4651,7 @@ const ACTIONS = [
   ["view3d", "Top or 3D view", "V", () => { if (window.View3D && View3D.toggle) View3D.toggle(); }],
   ["menu", "Setup", "M", () => openMenu("open")],
 ];  // [id, label, key, run, once: held down it toggles once]
-function toggleAt(key) { pushUndo(); toggleKey(key, S.tick); changed(); }
+function toggleAt(key) { pushUndo(); const before = keysNow(); toggleKey(key, S.tick); markByHand(before); changed(); }
 const CODE_KEYS = { BracketLeft: "[", BracketRight: "]", Comma: ",", Period: ".", Slash: "/", Semicolon: ";", Quote: "'",
   Minus: "-", Equal: "=", Backquote: "`", Backslash: "\\" };
 function keyName(e) {  // the key a keydown means, as ACTIONS write it (null: a modifier alone)
@@ -4518,7 +4690,10 @@ document.addEventListener("keydown", e => {
   else if (e.key === "Escape") { S.range = null; render(); }
   else if ((e.key === "Delete" || e.key === "Backspace") && !e.shiftKey && !ctrl) {
     if (S.sel && S.sel.type === "yaw") { pushUndo(); if (deleteYawKey(S.sel.index)) changed(); else S.undo.pop(); }
-    else if (S.sel && S.sel.type === "range") { pushUndo(); S.norm.keys = S.norm.keys.filter(r => r !== S.sel.range); S.sel = null; changed(); }
+    else if (S.sel && S.sel.type === "range") {
+      pushUndo(); const before = keysNow();
+      S.norm.keys = S.norm.keys.filter(r => r !== S.sel.range); S.sel = null; markByHand(before); changed();
+    }
     else if (S.sel && S.sel.type === "block") removeBlock(S.sel.block);
   }
 });

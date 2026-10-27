@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from tasurf.interp import Key, sample, value_at, wrap_degrees
+from tasurf.interp import Key, joint_half, joint_slopes, sample, value_at, wrap_degrees
 
 
 class WrapTest(unittest.TestCase):
@@ -91,6 +91,67 @@ class InterpTest(unittest.TestCase):
             s = t / 10
             want = (-2 * s**3 + 3 * s**2) * 10 + (s**3 - 2 * s**2 + s) * 30 + (s**3 - s**2) * -10
             self.assertAlmostEqual(value_at(keys, t), want)
+
+
+class JointTest(unittest.TestCase):
+    """joint: straight lines (a steady turn rate) with rounded joints at the keys, through every key exactly."""
+
+    V = [Key(0, 0.0, "joint"), Key(40, -80.0, "joint"), Key(80, 0.0, "joint"), Key(100, 30.0, "joint")]
+
+    def rates(self, keys, n):
+        v = sample(keys, n)
+        return v, [v[t + 1] - v[t] for t in range(n - 1)]
+
+    def test_through_every_key_with_straight_parts_and_a_smooth_joint(self):
+        v, r = self.rates(self.V, 101)
+        self.assertEqual([v[k.tick] for k in self.V], [k.value for k in self.V])
+        self.assertEqual(joint_half(self.V, 1), 10.0)  # a quarter of the shorter segment beside it
+        self.assertEqual(len({round(x, 9) for x in r[:30]}), 1)  # a steady rate up to the joint at 30 .. 50
+        self.assertEqual(len({round(x, 9) for x in r[50:70]}), 1)
+        self.assertLess(r[0], -2.0)  # tilted past key to key (-2) so the rounded joint reaches -80
+        self.assertTrue(all(r[t] < r[t + 1] + 1e-12 for t in range(29, 50)))  # the rate turns round evenly
+        self.assertLess(max(abs(r[t + 1] - r[t]) for t in range(99)), 0.35)  # no corner anywhere
+        self.assertEqual(min(v), -80.0)  # never past the key
+
+    def test_value_at_and_sample_agree_bit_for_bit(self):
+        keys = self.V + [Key(130, 10.0, "cubic"), Key(150, 40.0, "joint"), Key(160, 0.0, "linear")]
+        v = sample(keys, 170)
+        self.assertEqual([value_at(keys, t) for t in range(170)], v)
+
+    def test_a_width_of_zero_is_a_corner_and_a_wider_one_rounds_more(self):
+        sharp = [Key(0, 0.0, "joint"), Key(40, -80.0, "joint", joint=0.0), Key(80, 0.0, "joint")]
+        _, r = self.rates(sharp, 81)
+        self.assertEqual((r[38], r[39], r[40], r[41]), (-2.0, -2.0, 2.0, 2.0))  # key to key, a corner at 40
+        wide = [Key(0, 0.0, "joint"), Key(40, -80.0, "joint", joint=40.0), Key(80, 0.0, "joint")]
+        _, rw = self.rates(wide, 81)
+        _, rn = self.rates(self.V[:3], 81)
+        self.assertLess(max(abs(rw[t + 1] - rw[t]) for t in range(79)), max(abs(rn[t + 1] - rn[t]) for t in range(79)))
+
+    def test_moving_a_key_reshapes_the_curve_near_it_only(self):
+        keys = [Key(10 * i, float((-1) ** i * 20 + i), "joint") for i in range(30)]
+        moved = list(keys)
+        moved[25] = Key(250, keys[25].value + 15.0, "joint")
+        a, b = sample(keys, 300), sample(moved, 300)
+        self.assertEqual(a[:150], b[:150])
+        self.assertNotEqual(a[240:250], b[240:250])
+
+    def test_a_cubic_meets_a_joint_line_without_a_corner(self):
+        keys = [Key(0, 0.0, "joint"), Key(30, 60.0, "cubic"), Key(60, 60.0, "joint"), Key(90, 0.0, "linear")]
+        _, r = self.rates(keys, 91)
+        self.assertEqual(r[28], 2.0)  # the line, into the cubic at 30 (key to key the cubic would leave flat)
+        self.assertLess(abs(r[30] - r[29]), 0.1)
+        self.assertLess(abs(r[60] - r[59]), 0.1)
+
+    def test_a_slope_a_smooth_curve_left_on_a_joint_key_is_ignored(self):
+        # a key that was a smooth curve keeps its slope when it becomes a joint; only a width makes a slope its line
+        clean = [Key(0, 2.6, "cubic", 11.3), Key(5, 62.5, "joint"), Key(15, 36.8, "joint"), Key(25, 37.5, "joint"), Key(30, 37.0, "linear")]
+        left = [clean[0], Key(5, 62.5, "joint", 11.98), Key(15, 36.8, "joint", -2.57), Key(25, 37.5, "joint", 11.98), clean[4]]
+        v = sample(left, 31)
+        self.assertEqual(v, sample(clean, 31))
+        self.assertTrue(all(v[t] > v[t + 1] for t in range(5, 12)))  # down from 62.5 towards 36.8
+        self.assertGreater(min(v[5:25]), 35.5)  # rounding past the key a little, no dip (the slopes made one to ~20)
+        said = [clean[0], Key(5, 62.5, "joint", -1.0, 2.5)] + clean[2:]
+        self.assertEqual(joint_slopes(said, 1, 1)[1], -1.0)
 
 
 if __name__ == "__main__":

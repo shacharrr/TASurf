@@ -50,6 +50,7 @@ keys are errors, so typos such as `"form"` instead of `"from"` are caught.
 | `autobhop` | no  | `true`: holding jump jumps again the moment you land (below). Default `false`. |
 | `camera_smoothing` | no | what replays look along: `"strafe"` (default), `"all"` or `"off"` (below). |
 | `turns`    | no  | the editor's curve turns, by name only (below); not baked |
+| `ad_by_hand` | no | the editor's ticks whose A and D were set by hand (below); not baked |
 
 ## settings
 
@@ -116,12 +117,18 @@ in `tasurf.local.json`).
 }
 ```
 
-A key is `[tick, value]`, `[tick, value, "interp"]`, `[tick, value, "interp", slope]` or
-`{"tick": t, "value": v, "interp": "...", "slope": s}`. Ticks must be strictly increasing
-and inside `0 .. length-1`. Values are degrees. `slope` (optional, degrees per tick) is
-the curve's slope at that key wherever a `cubic` segment starts or ends there, in place of
-the estimate from the neighbouring keys. The editor writes slopes when you bend the curve,
-so the bent part meets the rest without a corner.
+A key is `[tick, value]`, `[tick, value, "interp"]`, `[tick, value, "interp", slope]`,
+`[tick, value, "interp", slope, joint]` (slope may be `null` there) or
+`{"tick": t, "value": v, "interp": "...", "slope": s, "joint": w}`. Ticks must be strictly
+increasing and inside `0 .. length-1`. Values are degrees. `slope` (optional, degrees per
+tick) is the curve's slope at that key wherever a `cubic` segment starts or ends there, in
+place of the estimate from the neighbouring keys; for a `joint` segment it is the slope of
+its line, but only when the key also gives its `joint` width (a slope alone on a joint key,
+as one a smooth curve leaves when its key becomes a joint, is ignored and the line fitted).
+`joint` (optional, ticks, at least 0) is the width of the rounded joint at the key (see
+below). The editor writes slopes when you bend a cubic curve, so the bent part meets
+the rest without a corner, and edits next to joint segments write in the lines and widths
+that keep the part they don't change the same.
 
 **Yaw is unwrapped.** 170 → 190 turns +20° through 180; 170 → −170 turns −340°.
 Write values continuously (…, 350, 370, 390, …) and interpolation never takes the
@@ -138,6 +145,18 @@ A key's `interp` shapes the segment from that key to the next one:
 | `linear` | straight line |
 | `smooth` | ease in/out (smoothstep): zero slope at both keys |
 | `cubic`  | cubic Hermite through the keys, slopes from the neighbouring keys (non-uniform Catmull-Rom) unless a key gives its own, smooth across keys |
+| `joint`  | a straight line (a steady turn rate); where two joint segments meet, a rounded joint (below). The editor's curve |
+
+**Joints.** A run of `joint` segments is straight lines from key to key with each key in
+between a smooth joint: over the ticks round the key (`joint` wide, half before and half
+after; by default a quarter of the shorter segment beside it on each side, so half that
+segment in all) the turn rate goes from one line's to the next along a smoothstep, so the
+yaw has no corner, and neither does its rate. The curve goes exactly through every key: the
+lines tilt a little (a few percent at a sharp turn) so the rounded joints meet the keys.
+Each line is fitted to its neighbours' over six passes, so moving a key reshapes the curve
+a few keys either side and no further. `"joint": 0` makes the key a plain corner. Where a
+joint line meets a `cubic` segment, the cubic takes the line's slope there, so they join
+without a corner.
 
 Before the first key the first value holds; after the last key the last value
 holds.
@@ -311,5 +330,18 @@ plays, and nothing here is baked, so the run and its hash are the same with or w
 ```
 
 `to` is exclusive; `rate` is degrees per tick (positive turns left); `shape` is `linear` (constant
-speed) or `smooth` (ease in and out). Inserting and deleting ticks moves and cuts them as it does
-key ranges, and a new turn over part of one cuts it.
+speed) or `smooth` (ease in and out). Deleting ticks moves and cuts them as it does key ranges, and a
+new turn over part of one cuts it. Ticks inserted inside one (or inside an auto-strafe range) aren't
+part of it: it's split round them, and at its first tick they come before it.
+
+## ad_by_hand
+
+The editor's ticks whose A or D you set by hand. With **A and D follow the yaw** on, moving the yaw
+holds A where it turns left and D where it turns right, but not on these ticks. Nothing here is baked.
+
+```json
+"ad_by_hand": [ { "from": 183, "to": 184 }, { "from": 240, "to": 252 } ]
+```
+
+`to` is exclusive. The editor joins touching spans and keeps them inside the timeline; inserting,
+deleting and recording over ticks move and cut them as they do key ranges.

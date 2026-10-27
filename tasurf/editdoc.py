@@ -20,7 +20,7 @@ from typing import Any
 
 from . import buttons
 from .bake import BakedFile, bake_inputs, read_baked
-from .interp import Key, key_slope, segment_slope, value_at, wrap_degrees
+from .interp import JOINT_PASSES, Key, joint_half, joint_rate, joint_slopes, key_slope, segment_slope, value_at, wrap_degrees
 from .timeline import INTERP_MODES, Timeline, TimelineError, bits_to_float, float_to_bits, parse_timeline
 
 DISPLAY_NAMES = {"forward": "W", "back": "S", "moveleft": "A", "moveright": "D"}
@@ -30,8 +30,18 @@ def _is_comment(obj: Any) -> bool:
     return isinstance(obj, dict) and bool(obj) and all(k.startswith("_") for k in obj)
 
 
+def _kl(tick: int, value: float, interp: str, slope: float | None = None, joint: float | None = None) -> list:
+    """A key as the editor has it: [tick, value, interp], then [slope] or [slope or None, joint]."""
+    return [tick, value, interp] + ([slope] if slope is not None or joint is not None else []) + ([joint] if joint is not None else [])
+
+
+def _kfields(k: list) -> tuple[float | None, float | None]:
+    """An editor key's slope and joint width (None: not given)."""
+    return (k[3] if len(k) > 3 else None), (k[4] if len(k) > 4 else None)
+
+
 def _keys_out(keys) -> list[list]:
-    return [[k.tick, k.value, k.interp] + ([k.slope] if k.slope is not None else []) for k in keys]
+    return [_kl(k.tick, k.value, k.interp, k.slope, k.joint) for k in keys]
 
 
 def normalized(tl: Timeline) -> dict:
@@ -52,6 +62,7 @@ def normalized(tl: Timeline) -> dict:
         **({"autobhop": True} if tl.autobhop else {}),
         **({} if tl.camera_smoothing == "strafe" else {"camera_smoothing": tl.camera_smoothing}),
         **({"turns": [{"from": b.start, "to": b.end, "rate": b.rate, "shape": b.shape} for b in tl.turns]} if tl.turns else {}),
+        **({"ad_by_hand": [{"from": a, "to": b} for a, b in tl.ad_by_hand]} if tl.ad_by_hand else {}),
     }
 
 
@@ -69,9 +80,12 @@ def _track(keys: Any, what: str) -> list[list]:
     for k in sorted(keys, key=lambda k: k[0]):
         tick, value, interp = int(k[0]), float(k[1]), str(k[2])
         slope = float(k[3]) if len(k) > 3 and k[3] is not None else None
+        joint = float(k[4]) if len(k) > 4 and k[4] is not None else None
         if interp not in INTERP_MODES:
             raise TimelineError(f"{what}: bad interp {interp!r}")
-        out.append([tick, value, interp] + ([slope] if slope is not None else []))  # no rounding: imported values are exact float32s
+        if joint is not None and not joint >= 0.0:
+            raise TimelineError(f"{what}: a joint's width can't be negative")
+        out.append(_kl(tick, value, interp, slope, joint))  # no rounding: imported values are exact float32s
     return out
 
 
@@ -145,6 +159,21 @@ def apply_edits(doc: dict, edits: dict) -> dict:
             new["turns"] = out
         else:
             new.pop("turns", None)
+    if "ad_by_hand" in edits:  # the editor's ticks whose A and D were set by hand: joined, inside the timeline
+        length = int(new["length"])
+        out = []
+        for r in sorted(edits["ad_by_hand"] or [], key=lambda r: int(r["from"])):
+            a, b = max(0, int(r["from"])), min(length, int(r["to"]))
+            if b <= a:
+                continue
+            if out and a <= out[-1]["to"]:
+                out[-1]["to"] = max(out[-1]["to"], b)
+            else:
+                out.append({"from": a, "to": b})
+        if out:
+            new["ad_by_hand"] = out
+        else:
+            new.pop("ad_by_hand", None)
     return new
 
 
@@ -158,11 +187,11 @@ MAX_TICKS = 1_000_000
 
 
 def _key(k) -> Key:
-    """A track key from the editor: [tick, value, interp], or [tick, value, interp, slope]."""
-    if len(k) not in (3, 4):
-        raise TimelineError("a key is [tick, value, interp] or [tick, value, interp, slope]")
-    slope = k[3] if len(k) == 4 else None
-    return Key(int(k[0]), float(k[1]), str(k[2]), None if slope is None else float(slope))
+    """A track key from the editor: [tick, value, interp], [tick, value, interp, slope] or [..., slope or None, joint]."""
+    if len(k) not in (3, 4, 5):
+        raise TimelineError("a key is [tick, value, interp], [tick, value, interp, slope] or [tick, value, interp, slope, joint]")
+    slope, joint = _kfields(k)
+    return Key(int(k[0]), float(k[1]), str(k[2]), None if slope is None else float(slope), None if joint is None else float(joint))
 
 
 def _keys(track: list[list]) -> list[Key]:
@@ -184,7 +213,9 @@ def _segment_interp(track: list[list], tick: int) -> str:
 
 
 def _own_slope(k: list) -> bool:
-    return len(k) > 3 and k[3] is not None
+    """Whether a key says a slope that counts (a joint key's only with its joint's width: _said_slope in interp.py)."""
+    slope, joint = _kfields(k)
+    return slope is not None and (k[2] != "joint" or joint is not None)
 
 
 def _curve_slope(track: list[list], tick: int, side: str) -> float:
@@ -202,11 +233,13 @@ def _curve_slope(track: list[list], tick: int, side: str) -> float:
             if k0.interp == "smooth":
                 s = (tick - k0.tick) / span
                 return (k1.value - k0.value) * 6.0 * s * (1.0 - s) / span
+            if k0.interp == "joint":
+                return joint_rate(keys, i, tick)
             return segment_slope(keys, i, tick)
     return 0.0
 
 
-def _pin(keys: list[list], tick: int | None, side: str, source: list[list]) -> list[list]:
+def _pin(keys: list[list], tick: int | None, side: str, source: list[list], corner: bool = False) -> list[list]:
     """keys with a key at tick on the curve of source, such that the values on
     one side of it (side "before": ticks <= tick, "after": ticks >= tick, or
     "both") stay what source gives. A hold or linear segment just gets the key.
@@ -216,11 +249,18 @@ def _pin(keys: list[list], tick: int | None, side: str, source: list[list]) -> l
     kept part is written out tick by tick. A cubic segment on the kept side
     that meets the key where things change gets that key's slope written in, so
     it no longer depends on the keys beyond. Before the first key and after the
-    last the curve is flat; the new key there holds that value."""
+    last the curve is flat; the new key there holds that value.
+
+    A joint segment's curve depends on keys a few segments away (its line is
+    fitted to its neighbours'), so near the cut the joint segments on the kept
+    side get their lines' slopes and their joints' widths written in (_joint_pin)."""
     keys = [list(k) for k in keys]
     if tick is None:
         return keys
     src = _keys(source)
+    at = next((x for x, k in enumerate(src) if k.tick == tick), None)
+    if _joint_cut_at(src, tick) or (corner and side == "before" and at is not None and joint_half(src, at) > 0.0):
+        return _joint_pin(keys, tick, side, src, corner)
 
     def exact(t, interp="linear"):
         return [t, _value(source, t), interp]
@@ -231,10 +271,13 @@ def _pin(keys: list[list], tick: int | None, side: str, source: list[list]) -> l
 
     added: list[list] = []
 
-    def freeze(j):  # key j says the slope cubic segments meet it with, as source has it
+    def freeze(j):  # key j says the slope cubic segments meet it with, as source has it (a joint key, where a
+        #             cubic arrives, with its joint's width too: 0, without which the slope wouldn't count)
         if not _own_slope(keys[j]):
             at = next((x for x, k in enumerate(src) if k.tick == keys[j][0]), None)
-            keys[j] = keys[j][:3] + [key_slope(src, at) if at is not None else key_slope(_keys(keys), j)]
+            joint = _kfields(keys[j])[1]
+            keys[j] = _kl(*keys[j][:3], key_slope(src, at) if at is not None else key_slope(_keys(keys), j),
+                          0.0 if joint is None and keys[j][2] == "joint" else joint)
 
     def cubic_back(j):  # a cubic segment's slopes come from the neighbouring keys (unless its keys give them)
         if j >= 0 and keys[j][2] == "cubic":
@@ -279,6 +322,116 @@ def _pin(keys: list[list], tick: int | None, side: str, source: list[list]) -> l
             cubic_back(i - 1)
         if side in ("after", "both"):
             cubic_forward(i + 1)
+    return sorted(keys + added, key=lambda k: k[0])
+
+
+JOINT_ZONE = JOINT_PASSES + 3  # joint segments either side of a cut that say their line and width (see _joint_pin)
+
+
+def _joint_cut_at(src: list[Key], tick: int) -> bool:
+    """Whether a cut at tick is in a joint segment of src, or at a key one leaves from."""
+    for i in range(len(src) - 1):
+        if src[i].tick <= tick < src[i + 1].tick:
+            return src[i].interp == "joint"
+    return False
+
+
+def _joint_pin(keys: list[list], tick: int, side: str, src: list[Key], corner: bool = False) -> list[list]:
+    """_pin where the cut is in a joint segment of src (or at a key one leaves from). The joint segments on the
+    kept side near the cut say their line and their joints' widths, as src has them, so keys beyond can't move
+    them. Keys there keep their kind; the keys a cut adds are joints of width 0 (corners). Before (ticks <= tick
+    kept): a cut at a key keeps its joint (the line leaving it written in); a cut inside a segment gets a key there
+    (inside the joint at its end: a key where the straight part ends, and the joint's ticks up to the cut written
+    out). After (ticks >= tick
+    kept): the ticks of the joint at the segment's start that are kept are written out, and the next key starts
+    the line on (its slope written in, without a joint). Both: both. corner (before, for Insert): a cut at a key
+    with a joint leaves no joint there; the joint's ticks before it are written out, as for a cut in the joint
+    at a segment's end, and the key is a corner.
+
+    Cutting a segment's straight part makes it run between other ends, which can move its values in the last
+    bits: if any of the segment's ticks would reach the game as a different float32, its kept ticks are written
+    out instead (the straight part and the joint at its end too)."""
+    out = _joint_cut(keys, tick, side, src, spell=False, corner=corner)
+    seg = next(i for i in range(len(src) - 1) if src[i].tick <= tick < src[i + 1].tick)
+    at = next((x for x, k in enumerate(src) if k.tick == tick), None)
+    ends = at - 1 if corner and at is not None and joint_half(src, at) > 0.0 else seg  # where the kept part before ends
+    lo = tick if side == "after" else src[ends].tick
+    hi = tick if side == "before" else src[seg + 1].tick
+    cut = _keys(out)
+    for t in range(lo, hi + 1):
+        a, b = value_at(cut, t), value_at(src, t)
+        if float_to_bits(wrap_degrees(a)) != float_to_bits(wrap_degrees(b)) or float_to_bits(a) != float_to_bits(b):
+            return _joint_cut(keys, tick, side, src, spell=True, corner=corner)
+    return out
+
+
+def _joint_cut(keys: list[list], tick: int, side: str, src: list[Key], spell: bool, corner: bool = False) -> list[list]:
+    """_joint_pin's keys; spell: the kept ticks of the cut segment written out."""
+    keys = [list(k) for k in keys]
+    by_tick = {k[0]: k for k in keys}
+    added: list[list] = []
+    n = len(src)
+    sidx = {k.tick: x for x, k in enumerate(src)}
+
+    def put(t: int) -> list:  # the key at t: one src has keeps its kind; a new one is a joint without a joint (a corner)
+        k = by_tick.get(t)
+        if k is None:
+            k = [t, value_at(src, t), "joint", None, 0.0]
+            by_tick[t] = k
+            added.append(k)
+        elif t not in sidx:
+            k[2] = "joint"
+        return k
+
+    def setf(k: list, slope=None, joint=None):  # give a key a slope and a joint width it doesn't say yet
+        s0, j0 = _kfields(k)
+        if k[2] == "joint" and j0 is None:  # a joint key's slope without a width doesn't count (src fits that line)
+            s0 = None
+        k[3:] = _kl(0, 0.0, "", s0 if s0 is not None else slope, j0 if j0 is not None else joint)[3:]
+
+    def freeze(lo_seg: int, hi_seg: int, hi_key: int):  # the joint segments' lines and the joints' widths there
+        lo_seg, hi_seg = max(0, lo_seg), min(n - 2, hi_seg)
+        if hi_seg >= lo_seg:
+            for j, s in joint_slopes(src, lo_seg, hi_seg).items():  # each with its joint's width, so the line counts
+                if src[j].tick in by_tick:
+                    setf(by_tick[src[j].tick], slope=s, joint=2.0 * joint_half(src, j))
+        for i in range(max(1, lo_seg), min(n - 2, hi_key) + 1):
+            h = joint_half(src, i)
+            if h > 0.0 and src[i].tick in by_tick:
+                setf(by_tick[src[i].tick], joint=2.0 * h)
+
+    seg = next(i for i in range(n - 1) if src[i].tick <= tick < src[i + 1].tick)  # a joint segment
+    t0, t1 = src[seg].tick, src[seg + 1].tick
+    at = sidx.get(tick)
+    if side in ("before", "both"):
+        if at is not None and not (corner and joint_half(src, at) > 0.0):
+            if joint_half(src, at) > 0.0:  # its joint stays, with the line it had leaving (written in)
+                freeze(at - JOINT_ZONE, at, at)
+            elif at > 0 and src[at - 1].interp == "cubic":  # a cubic arriving takes the line's slope: written in (no joint)
+                setf(by_tick[tick], slope=key_slope(src, at), joint=0.0)
+        else:  # inside a segment, or (corner) at a key whose joint goes: the end of the segment arriving there
+            ends = seg if at is None else at - 1
+            u0, u1 = src[ends].tick, src[ends + 1].tick
+            freeze(ends - JOINT_ZONE, ends, ends)
+            if spell:  # from where the joint at the segment's start ends
+                first = math.ceil(u0 + joint_half(src, ends))
+            else:  # in the joint at its end: from where the straight part ends
+                b = u1 - joint_half(src, ends + 1)
+                first = math.floor(b) if tick > b else tick
+            for t in range(max(u0 + 1, first), tick + 1):
+                put(t)
+            if at is not None:  # the key: a corner (its slope, if it didn't count, goes)
+                s0, j0 = _kfields(by_tick[tick])
+                by_tick[tick][3:] = _kl(0, 0.0, "", s0 if j0 is not None else None, 0.0)[3:]
+    if side in ("after", "both"):
+        if spell:  # up to where the joint at the segment's end starts
+            first = max(tick, min(math.floor(t1 - joint_half(src, seg + 1)), t1 - 1))
+        else:  # past the joint at its start
+            first = max(tick, min(math.ceil(t0 + joint_half(src, seg)), t1 - 1))
+        for t in range(tick, first):
+            put(t)
+        setf(put(first), slope=joint_slopes(src, seg, seg)[seg], joint=0.0)
+        freeze(seg + 1, seg + 1 + JOINT_ZONE, seg + 2 + JOINT_ZONE)
     return sorted(keys + added, key=lambda k: k[0])
 
 
@@ -328,7 +481,8 @@ def _with(edits: dict, **changes) -> dict:
     out = {"length": int(edits["length"]), "yaw": edits["yaw"], "pitch": edits.get("pitch"),
            "keys": [dict(r) for r in edits.get("keys", [])],
            "strafe": [dict(r) for r in edits.get("strafe") or []], "view_pitch": edits.get("view_pitch"),
-           "turns": [dict(r) for r in edits.get("turns") or []]}
+           "turns": [dict(r) for r in edits.get("turns") or []],
+           "ad_by_hand": [dict(r) for r in edits.get("ad_by_hand") or []]}
     out.update(changes)
     return out
 
@@ -345,14 +499,26 @@ def insert_ticks(edits: dict, at: int, count: int) -> dict:
     def track(tr):
         if tr is None:
             return None
-        if at == length:
+        if at == length or at > tr[-1][0]:
             return [list(k) for k in tr]  # past the last key the value holds already
-        pinned = _pin(tr, at, "both", tr)
-        here = next(k for k in pinned if k[0] == at)
-        out = [[k[0] + count if k[0] >= at else k[0], *k[1:]] for k in pinned]
-        # hold tick at's value over the new ticks (a cubic arriving there meets it with the slope it had)
-        out.append([at, _value(tr, at), "hold"] + ([here[3]] if _own_slope(here) else []))
-        return sorted(out, key=lambda k: k[0])
+        if at < tr[0][0]:
+            return [[k[0] + count, *k[1:]] for k in tr]  # and before the first
+        before = _pin(tr, at, "before", tr, corner=True)  # the curve up to tick at, with no joint there
+        after = _pin(tr, at, "after", tr)  # and from it on, moved by count
+        here = next(k for k in before if k[0] == at)
+        head = [k for k in before if k[0] < at]
+        tail = [[k[0] + count, *k[1:]] for k in after if k[0] >= at]
+        # where the held ticks end, no joint either: a joint key's width 0 (its slope, if it didn't count, goes);
+        # another key's joint dropped, the curve leaving it with the rate the joint had there
+        s, w = _kfields(tail[0])
+        if tail[0][2] == "joint":
+            tail[0][3:] = _kl(0, 0.0, "", s if w is not None else None, 0.0)[3:]
+        elif w is not None:
+            tail[0][3:] = [key_slope(_keys(after), next(j for j, k in enumerate(after) if k[0] == at))]
+        # tick at's value held over the new ticks: a joint segment with corners at both ends, so exactly flat (a
+        # cubic arriving there meets it with the slope it had)
+        slope = _kfields(here)[0] if head and head[-1][2] == "cubic" else None
+        return head + [_kl(at, _value(tr, at), "joint", slope, 0.0)] + tail
 
     src = min(at, length - 1)
 
@@ -368,9 +534,22 @@ def insert_ticks(edits: dict, at: int, count: int) -> dict:
                 out.append(dict(r))
         return out
 
+    def blocks(rs):  # auto-strafe and turns: the new ticks aren't part of one (one they're inside is split round them)
+        out = []
+        for r in rs:
+            f, t = int(r["from"]), int(r["to"])
+            if f < at < t:
+                out += [dict(r, to=at), dict(r, **{"from": at + count, "to": t + count})]
+            elif f >= at:
+                out.append(dict(r, **{"from": f + count, "to": t + count}))
+            else:
+                out.append(dict(r))
+        return out
+
     return _with(edits, length=length + count, yaw=track(edits["yaw"]), pitch=track(edits.get("pitch")),
-                 keys=merge_ranges(ranges(edits.get("keys", []))), strafe=_merge_strafe(ranges(edits.get("strafe") or [])),
-                 view_pitch=track(edits.get("view_pitch")), turns=ranges(edits.get("turns") or []))
+                 keys=merge_ranges(ranges(edits.get("keys", []))), strafe=_merge_strafe(blocks(edits.get("strafe") or [])),
+                 view_pitch=track(edits.get("view_pitch")), turns=blocks(edits.get("turns") or []),
+                 ad_by_hand=ranges(edits.get("ad_by_hand") or []))
 
 
 def delete_ticks(edits: dict, start: int, end: int) -> dict:
@@ -407,7 +586,8 @@ def delete_ticks(edits: dict, start: int, end: int) -> dict:
 
     return _with(edits, length=length - n, yaw=track(edits["yaw"]), pitch=track(edits.get("pitch")),
                  keys=merge_ranges(ranges(edits.get("keys", []))), strafe=_merge_strafe(ranges(edits.get("strafe") or [])),
-                 view_pitch=track(edits.get("view_pitch")), turns=ranges(edits.get("turns") or []))
+                 view_pitch=track(edits.get("view_pitch")), turns=ranges(edits.get("turns") or []),
+                 ad_by_hand=ranges(edits.get("ad_by_hand") or []))
 
 
 def _merge_strafe(ranges: list[dict]) -> list[dict]:
@@ -546,7 +726,8 @@ def splice_recording(edits: dict, at: int, rec: list, move_speed: float, current
         keys.append(dict(r, **{"from": r["from"] + at, "to": r["to"] + at}))
     strafe = _cut_strafe(edits.get("strafe") or [], at, max(length, len(rec)))
     return _with(edits, length=len(rec), yaw=new_yaw, pitch=new_pitch, keys=merge_ranges(keys), strafe=strafe,
-                 view_pitch=new_view, turns=_cut_strafe(edits.get("turns") or [], at, max(length, len(rec))))
+                 view_pitch=new_view, turns=_cut_strafe(edits.get("turns") or [], at, max(length, len(rec))),
+                 ad_by_hand=_cut_strafe(edits.get("ad_by_hand") or [], at, max(length, len(rec))))
 
 
 def set_length(edits: dict, new_length: int) -> dict:
@@ -627,6 +808,9 @@ def make_turn(edits: dict, first: int, last: int, rate: float, shape: str = "lin
             y1 = y0 + rate * span
         delta = y1 - _value(yaw, last)
         pinned = _pin(yaw, first, "before", yaw)  # the curve before the turn stays as it was
+        cut = next(k for k in pinned if k[0] == first)
+        if _kfields(cut)[1]:  # a joint kept there: the turn starts at it, leaving with the rate the joint has
+            turn[0] = _kl(first, y0, "cubic", *_kfields(cut))
         if after == "shift":
             pinned = _pin(pinned, last, "after", yaw)  # and after it, moved by delta
         end_interp = _segment_interp(pinned, last)
@@ -634,10 +818,11 @@ def make_turn(edits: dict, first: int, last: int, rate: float, shape: str = "lin
         if after == "keep":  # the curve on to the next key leaves with the slope it had; that key keeps its own
             out += turn + [[last, y1, "cubic", s1]]
             nxt = next((k for k in out if k[0] > last), None)
-            if nxt is not None and not _own_slope(nxt):
-                nxt[3:] = [_curve_slope(yaw, nxt[0], "out")]
+            if nxt is not None and not _own_slope(nxt) and nxt[2] != "joint":  # a joint line leaving: the cubic takes its slope
+                nxt[3:] = _kl(0, 0.0, "", _curve_slope(yaw, nxt[0], "out"), _kfields(nxt)[1])[3:]
         else:  # the curve after is the one it was, moved: the turn arrives with its slope
-            out += turn + [[last, y1, end_interp] + ([s1] if end_interp == "cubic" else [])]
+            kept = next(k for k in pinned if k[0] == last)
+            out += turn + [_kl(last, y1, end_interp, *(_kfields(kept) if end_interp == "joint" else ((s1 if end_interp == "cubic" else None), None)))]
         turns = sorted(turns + [{"from": first, "to": last + 1, "rate": rate, "shape": shape}], key=lambda r: r["from"])
     ranges = [dict(r) for r in edits.get("keys", [])]
     for key, action in (keys or {}).items():

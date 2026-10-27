@@ -128,6 +128,8 @@ pub struct Timeline {
     /// yaw played, zigzag and all
     pub camera_smoothing: String,
     pub turns: Vec<TurnBlock>, // the editor's curve turns, by name only
+    /// the editor's: ticks [from, to) whose A and D were set by hand (A and D following the yaw leave them)
+    pub ad_by_hand: Vec<(i64, i64)>,
     pub warnings: Vec<String>,
 }
 
@@ -434,28 +436,39 @@ fn parse_track(obj: &Value, ctx: &str, length: i64) -> Res<Vec<Key>> {
         if is_comment(k) {
             continue;
         }
-        let (tick, value, slope, interp_v) = if let Some(a) = k.as_array() {
-            if !(2..=4).contains(&a.len()) {
+        let (tick, value, slope, joint, interp_v) = if let Some(a) = k.as_array() {
+            if !(2..=5).contains(&a.len()) {
                 return err(format!(
-                    "{}: expected [tick, value], [tick, value, \"interp\"] or [tick, value, \"interp\", slope], got {}",
+                    "{}: expected [tick, value], [tick, value, \"interp\"], [tick, value, \"interp\", slope] or [tick, value, \"interp\", slope, joint], got {}",
                     kctx,
                     py::repr_value(k)
                 ));
             }
             let tick = int(&a[0], &format!("{}[0]", kctx))?;
             let value = num(&a[1], &format!("{}[1]", kctx))?;
-            let slope = if a.len() == 4 { Some(num(&a[3], &format!("{}[3]", kctx))?) } else { None };
-            (tick, value, slope, if a.len() >= 3 { a[2].clone() } else { default.clone() })
+            let slope =
+                if a.len() >= 4 && (a.len() == 4 || !a[3].is_null()) { Some(num(&a[3], &format!("{}[3]", kctx))?) } else { None };
+            let joint = if a.len() == 5 { Some(num(&a[4], &format!("{}[4]", kctx))?) } else { None };
+            (tick, value, slope, joint, if a.len() >= 3 { a[2].clone() } else { default.clone() })
         } else {
-            let kd = fields(k, &kctx, &["tick", "value", "interp", "slope"], &["tick", "value"])?;
+            let kd = fields(k, &kctx, &["tick", "value", "interp", "slope", "joint"], &["tick", "value"])?;
             let tick = int(&kd["tick"], &format!("{}.tick", kctx))?;
             let value = num(&kd["value"], &format!("{}.value", kctx))?;
             let slope = match kd.get("slope") {
                 Some(s) => Some(num(s, &format!("{}.slope", kctx))?),
                 None => None,
             };
-            (tick, value, slope, kd.get("interp").cloned().unwrap_or(default.clone()))
+            let joint = match kd.get("joint") {
+                Some(s) => Some(num(s, &format!("{}.joint", kctx))?),
+                None => None,
+            };
+            (tick, value, slope, joint, kd.get("interp").cloned().unwrap_or(default.clone()))
         };
+        if let Some(j) = joint {
+            if j < 0.0 {
+                return err(format!("{}: a joint's width can't be negative, got {}", kctx, py::repr(j)));
+            }
+        }
         let interp = interp_of(&interp_v, &kctx)?;
         if !(0..length).contains(&tick) {
             return err(format!("{}: tick {} is outside the timeline (0 .. {})", kctx, tick, length - 1));
@@ -465,7 +478,7 @@ fn parse_track(obj: &Value, ctx: &str, length: i64) -> Res<Vec<Key>> {
                 return err(format!("{}: tick {} must be greater than the previous key's tick {}", kctx, tick, last.tick));
             }
         }
-        keys.push(Key { slope, ..Key::new(tick, value, interp) });
+        keys.push(Key { slope, joint, ..Key::new(tick, value, interp) });
     }
     Ok(keys)
 }
@@ -654,15 +667,40 @@ fn parse_turns(raw: &Value, length: i64) -> Res<Vec<TurnBlock>> {
     Ok(out)
 }
 
+/// The editor's ticks whose A and D were set by hand: [from, to) spans, sorted, each inside the timeline.
+fn parse_by_hand(raw: &Value, length: i64) -> Res<Vec<(i64, i64)>> {
+    let list = match raw.as_array() {
+        Some(a) => a,
+        None => return err("ad_by_hand: expected a list"),
+    };
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for (i, r) in list.iter().enumerate() {
+        let ctx = format!("ad_by_hand[{}]", i);
+        if is_comment(r) {
+            continue;
+        }
+        let all = ["from", "to"];
+        let d = fields(r, &ctx, &all, &all)?;
+        let start = int(&d["from"], &format!("{}.from", ctx))?;
+        let end = int(&d["to"], &format!("{}.to", ctx))?;
+        if !(0 <= start && start < end && end <= length) {
+            return err(format!("{}: [{}, {}) must be inside the timeline (0 .. {}); 'to' is exclusive", ctx, start, end, length));
+        }
+        out.push((start, end));
+    }
+    out.sort();
+    Ok(out)
+}
+
 // --------------------------------------------------------------------------
 // timeline
 
 /// the camera replays show: smoothed on auto-strafe, everywhere, or not
 pub const CAMERA_SMOOTHING: [&str; 3] = ["strafe", "all", "off"];
 
-const TOP_FIELDS: [&str; 16] = [
+const TOP_FIELDS: [&str; 17] = [
     "format", "version", "name", "map", "length", "settings", "start", "input", "yaw", "pitch", "keys", "strafe", "view_pitch",
-    "autobhop", "camera_smoothing", "turns",
+    "autobhop", "camera_smoothing", "turns", "ad_by_hand",
 ];
 
 fn truthy(v: &Value) -> bool {
@@ -773,6 +811,7 @@ pub fn parse_timeline(obj: &Value, path: Option<&Path>, start_search_dirs: &[Pat
         None => None,
     };
     let turns = parse_turns(d.get("turns").unwrap_or(&Value::Array(vec![])), length)?;
+    let ad_by_hand = parse_by_hand(d.get("ad_by_hand").unwrap_or(&Value::Array(vec![])), length)?;
     let mut tl = Timeline {
         name,
         map: map.clone(),
@@ -789,6 +828,7 @@ pub fn parse_timeline(obj: &Value, path: Option<&Path>, start_search_dirs: &[Pat
         autobhop,
         camera_smoothing,
         turns,
+        ad_by_hand,
         warnings: Vec::new(),
     };
 

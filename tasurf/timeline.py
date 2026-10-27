@@ -109,6 +109,8 @@ class Timeline:
     # yaw played, zigzag and all
     camera_smoothing: str = "strafe"
     turns: list[TurnBlock] = field(default_factory=list)  # the editor's curve turns, by name only
+    # the editor's: ticks [from, to) whose A and D were set by hand (A and D following the yaw leave them)
+    ad_by_hand: list[tuple[int, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -299,25 +301,29 @@ def _parse_track(obj: Any, ctx: str, length: int) -> list[Key]:
         kctx = f"{ctx}.keys[{i}]"
         if _is_comment(k):
             continue
-        if isinstance(k, list):  # shorthand [tick, value], [tick, value, "interp"] or [tick, value, "interp", slope]
-            if len(k) not in (2, 3, 4):
-                raise TimelineError(f"{kctx}: expected [tick, value], [tick, value, \"interp\"] or "
-                                    f"[tick, value, \"interp\", slope], got {k!r}")
+        if isinstance(k, list):  # shorthand [tick, value], [tick, value, "interp"], [..., slope] or [..., slope or null, joint]
+            if len(k) not in (2, 3, 4, 5):
+                raise TimelineError(f"{kctx}: expected [tick, value], [tick, value, \"interp\"], "
+                                    f"[tick, value, \"interp\", slope] or [tick, value, \"interp\", slope, joint], got {k!r}")
             tick, value = _int(k[0], f"{kctx}[0]"), _num(k[1], f"{kctx}[1]")
-            slope = _num(k[3], f"{kctx}[3]") if len(k) == 4 else None
+            slope = _num(k[3], f"{kctx}[3]") if len(k) >= 4 and (len(k) == 4 or k[3] is not None) else None
+            joint = _num(k[4], f"{kctx}[4]") if len(k) == 5 else None
             interp = k[2] if len(k) >= 3 else default
         else:
-            kd = _fields(k, kctx, {"tick", "value", "interp", "slope"}, {"tick", "value"})
+            kd = _fields(k, kctx, {"tick", "value", "interp", "slope", "joint"}, {"tick", "value"})
             tick, value = _int(kd["tick"], f"{kctx}.tick"), _num(kd["value"], f"{kctx}.value")
             slope = _num(kd["slope"], f"{kctx}.slope") if "slope" in kd else None
+            joint = _num(kd["joint"], f"{kctx}.joint") if "joint" in kd else None
             interp = kd.get("interp", default)
+        if joint is not None and joint < 0:
+            raise TimelineError(f"{kctx}: a joint's width can't be negative, got {joint!r}")
         if interp not in INTERP_MODES:
             raise TimelineError(f"{kctx}: interp must be one of {', '.join(INTERP_MODES)}, got {interp!r}")
         if not 0 <= tick < length:
             raise TimelineError(f"{kctx}: tick {tick} is outside the timeline (0 .. {length - 1})")
         if keys and tick <= keys[-1].tick:
             raise TimelineError(f"{kctx}: tick {tick} must be greater than the previous key's tick {keys[-1].tick}")
-        keys.append(Key(tick, value, interp, slope))
+        keys.append(Key(tick, value, interp, slope, joint))
     return keys
 
 
@@ -442,13 +448,30 @@ def _parse_turns(raw: Any, length: int) -> list[TurnBlock]:
     return sorted(out, key=lambda b: b.start)
 
 
+def _parse_by_hand(raw: Any, length: int) -> list[tuple[int, int]]:
+    """The editor's ticks whose A and D were set by hand: [from, to) spans, sorted, each inside the timeline."""
+    if not isinstance(raw, list):
+        raise TimelineError("ad_by_hand: expected a list")
+    out: list[tuple[int, int]] = []
+    for i, r in enumerate(raw):
+        ctx = f"ad_by_hand[{i}]"
+        if _is_comment(r):
+            continue
+        d = _fields(r, ctx, {"from", "to"}, {"from", "to"})
+        start, end = _int(d["from"], f"{ctx}.from"), _int(d["to"], f"{ctx}.to")
+        if not 0 <= start < end <= length:
+            raise TimelineError(f"{ctx}: [{start}, {end}) must be inside the timeline (0 .. {length}); 'to' is exclusive")
+        out.append((start, end))
+    return sorted(out)
+
+
 # --------------------------------------------------------------------------
 # timeline
 
 
 CAMERA_SMOOTHING = ("strafe", "all", "off")  # the camera replays show: smoothed on auto-strafe, everywhere, or not
 _TOP_FIELDS = {"format", "version", "name", "map", "length", "settings", "start", "input",
-               "yaw", "pitch", "keys", "strafe", "view_pitch", "autobhop", "camera_smoothing", "turns"}
+               "yaw", "pitch", "keys", "strafe", "view_pitch", "autobhop", "camera_smoothing", "turns", "ad_by_hand"}
 
 
 def parse_timeline(obj: Any, path: Path | None = None, start_search_dirs: list[Path] | None = None) -> Timeline:
@@ -522,6 +545,7 @@ def parse_timeline(obj: Any, path: Path | None = None, start_search_dirs: list[P
         autobhop=autobhop,
         camera_smoothing=camera_smoothing,
         turns=_parse_turns(d.get("turns", []), length),
+        ad_by_hand=_parse_by_hand(d.get("ad_by_hand", []), length),
     )
 
     if start.map is not None and start.map != map_name:
