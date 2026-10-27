@@ -89,9 +89,10 @@ Currently there is no documentation. Most functionality is explained in the app 
   player, and the plugin replaces every field of its commands, so its own AI
   never moves it. A run resets it exactly like a player (same settle tick, same
   reset). Between runs it's frozen where its last run ended, out of everyone's
-  way. It holds only a knife (maxspeed 250, the same as a pistol), so start
-  states should be captured with a knife or pistol in hand. In edit mode you have
-  no weapon, so `tas_setstart` leaves maxspeed out of the start.
+  way. It holds no weapon, so it runs at 260 on the ground, CS:S's speed without a
+  weapon and what surf servers such as KSF play at (a knife or pistol would cap it
+  at 250). In edit mode you have no weapon either, so `tas_setstart` leaves
+  maxspeed out of the start.
 * **Maps without a `.nav` file:** CS:S won't simply add a bot there. It starts
   generating a navigation mesh, which takes minutes and reloads the map. So
   TASurf writes a minimal `cstrike/maps/<map>.nav` (one area, no paths) and
@@ -474,7 +475,7 @@ python -m tasurf check "C:/Program Files (x86)/Steam/steamapps/common/Counter-St
   SDKTools for `OnPlayerRunCmd`, teleporting and beams.
 * **A jump drops you to about 286 u/s:** that's CS:S's bunnyhop cap. With
   `sv_enablebunnyhopping 0` (its default) every jump cuts your speed to 1.1 × your
-  maxspeed (275 with a knife, 286 with no weapon). `tasurf_session.cfg` sets it to
+  maxspeed (286 without a weapon, as TASurf plays; 275 with a knife). `tasurf_session.cfg` sets it to
   1, as surf servers do; a run's header records the value it had, and the editor's
   prediction applies the cap when that is 0.
 * **The view jitters during playback, worst when ducking:** that's client-side
@@ -489,10 +490,10 @@ python -m tasurf check "C:/Program Files (x86)/Steam/steamapps/common/Counter-St
   The origin (feet) really moves; it's in the engine's state, not a glitch.
 * **The run aborts with "player respawned":** the round ended. Use `exec tasurf_session`.
 * **"your maxspeed is X":** you're holding a different weapon than at capture
-  (knife and pistols are 250).
-* **"the replay bot's maxspeed is 250 (knife) but the start state was captured at X":**
-  the start was captured holding a slower weapon. Capture it again with a knife or
-  pistol, or delete `"maxspeed"` from the start.
+  (none is 260; knife and pistols are 250).
+* **"the replay bot's maxspeed is X but the start state was captured at Y":**
+  the start was captured at a different speed. Capture it again, or delete
+  `"maxspeed"` from the start.
 * **The replay bot doesn't join:** `tas_status` says why. It joins your team a few
   seconds after you've joined one. `exec tasurf_session` kicks it, and it comes back.
   If the map had no `.nav` file, the first load reloads the map once.

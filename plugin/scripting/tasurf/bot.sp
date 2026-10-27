@@ -4,8 +4,8 @@
 // players. OnPlayerRunCmd replaces every field of the bot's commands (its own AI never
 // moves it), and a run resets the bot exactly like a player (Start_Apply). Between runs the
 // bot is frozen where it is (MOVETYPE_NONE), doesn't block anyone, can't take damage, and
-// holds only a knife (maxspeed 250, the same as a player with a knife or pistol). For the
-// run it gets its normal collision and damage back, like the player it stands in for.
+// holds no weapon, so it runs at 260 (CS:S's speed without a weapon, as on KSF). For the run it
+// gets its normal collision and damage back, like the player it stands in for.
 //
 // CS:S won't simply add a bot on a map without a navigation file: it starts generating one,
 // which can take minutes and reloads the map. So on such a map TASurf writes a minimal
@@ -63,7 +63,7 @@ void Bot_ForceCvars()
 	SetCvarIfDifferent("bot_controllable", "0");  // spectators can't take the bot over
 }
 
-// Between runs: frozen where it is, out of everyone's way, knife only.
+// Between runs: frozen where it is, out of everyone's way, no weapon.
 void Bot_Idle(int bot)
 {
 	if (GetEntityMoveType(bot) != MOVETYPE_NONE)
@@ -74,13 +74,13 @@ void Bot_Idle(int bot)
 	}
 	SetPropIfDifferent(bot, Prop_Data, "m_takedamage", DAMAGE_NO);
 	SetPropIfDifferent(bot, Prop_Send, "m_CollisionGroup", COLLISION_DEBRIS_TRIGGER);
-	Weapons_KnifeOnly(bot);
+	Weapons_Strip(bot);
 }
 
 // Right before a run: what a player has (Start_Apply then resets movement and position).
 void Bot_PrepareRun(int bot)
 {
-	Weapons_KnifeOnly(bot);
+	Weapons_Strip(bot);
 	SetPropIfDifferent(bot, Prop_Data, "m_takedamage", DAMAGE_YES);
 	SetPropIfDifferent(bot, Prop_Send, "m_CollisionGroup", g_BotCollision);
 }

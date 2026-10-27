@@ -338,8 +338,9 @@ switched off with `bot_stop`/`bot_zombie` as far as it goes) never moves it. A r
 the same `Start_Apply` and settle tick as a player. For the run it gets a player's collision group and
 damage back (fall damage changes `m_flVelocityModifier`, so it has to be taken as a player would);
 between runs it's frozen (`MOVETYPE_NONE`), non-solid (collision group 2, debris that still touches
-triggers) and can't be damaged. It holds only a knife, so its maxspeed is 250; the maxspeed check
-compares that with the start state. The human in edit mode is also in collision group 2, so the bot's
+triggers) and can't be damaged. It holds no weapon, so it runs at 260 (CS:S's speed without a weapon, as
+on KSF; a knife or pistol caps the player's speed at 250 although `m_flMaxspeed` still reads 260); the
+maxspeed check compares `m_flMaxspeed` with the start state. The human in edit mode is also in collision group 2, so the bot's
 movement traces never hit them.
 
 A bot executes exactly one command per tick, so the dropped-command handling never triggers for it. What

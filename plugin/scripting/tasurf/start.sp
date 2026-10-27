@@ -147,13 +147,13 @@ bool Start_Capture(int client, StartState st, bool still, char[] note, int notel
 	}
 	st.hasHealth = true;
 	st.health = GetClientHealth(client);
-	// Without a weapon in hand (edit mode) your maxspeed isn't a player's, so it isn't
-	// captured: the replay bot holds a knife (250, the same as a pistol).
+	// Without a weapon in hand (edit mode) it isn't captured: the replay bot has none either
+	// (260), whatever m_flMaxspeed says in noclip.
 	st.hasMaxspeed = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != -1;
 	st.maxspeed = st.hasMaxspeed ? GetEntPropFloat(client, Prop_Send, "m_flMaxspeed") : 0.0;
 	if (!st.hasMaxspeed && note[0] == '\0')
 	{
-		strcopy(note, notelen, "no weapon in hand: maxspeed not captured (the replay bot holds a knife)");
+		strcopy(note, notelen, "no weapon in hand: maxspeed not captured (the replay bot has none either: 260)");
 	}
 	return true;
 }

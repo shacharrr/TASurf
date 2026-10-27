@@ -3,8 +3,8 @@
 // Edit mode (the default, with the replay bot, tas_bot 1): you fly in noclip without
 // weapons, can't take damage and don't block anyone. Runs and previews play on the replay
 // bot (bot.sp), so you can watch from wherever you are. Record mode: you're a normal player
-// again (walking, with a knife) for tas_record, e.g. a prestrafe or a rough live run to start
-// a timeline from. Editor requests wait while you're in record mode.
+// again (walking, without a weapon: 260, as the replay bot) for tas_record, e.g. a prestrafe or a
+// rough live run to start a timeline from. Editor requests wait while you're in record mode.
 //
 // Nothing here touches the player a run plays on: the replay bot, or you while you record.
 
@@ -74,7 +74,8 @@ bool Mode_IsFrozen(int client)
 }
 
 // Make the human match the mode. changed: the mode (or tas_bot) just changed, so also undo
-// edit mode for record mode; otherwise record mode leaves you exactly as the game has you.
+// edit mode for record mode; otherwise record mode only takes away weapons (a respawn gives
+// some back), so you move as the replay bot does.
 void Mode_Apply(int client, bool changed)
 {
 	if (client <= 0 || !IsClientInGame(client) || IsFakeClient(client) || !IsPlayerAlive(client))
@@ -91,7 +92,7 @@ void Mode_Apply(int client, bool changed)
 		{
 			SetEntityMoveType(client, MOVETYPE_NOCLIP);
 		}
-		Weapons_Strip(client, false);
+		Weapons_Strip(client);
 		SetPropIfDifferent(client, Prop_Data, "m_takedamage", DAMAGE_NO);
 		int group = GetEntProp(client, Prop_Send, "m_CollisionGroup");
 		if (group != COLLISION_DEBRIS_TRIGGER)
@@ -100,8 +101,13 @@ void Mode_Apply(int client, bool changed)
 			SetEntProp(client, Prop_Send, "m_CollisionGroup", COLLISION_DEBRIS_TRIGGER);
 		}
 	}
-	else if (changed)
+	else
 	{
+		Weapons_Strip(client);
+		if (!changed)
+		{
+			return;
+		}
 		if (GetEntityMoveType(client) == MOVETYPE_NOCLIP)
 		{
 			float still[3];
@@ -112,10 +118,6 @@ void Mode_Apply(int client, bool changed)
 		if (GetEntProp(client, Prop_Send, "m_CollisionGroup") == COLLISION_DEBRIS_TRIGGER)
 		{
 			SetEntProp(client, Prop_Send, "m_CollisionGroup", g_HumanCollision[client]);
-		}
-		if (GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") == -1)
-		{
-			Weapons_KnifeOnly(client);
 		}
 	}
 }
@@ -205,7 +207,7 @@ void Mode_Set(int mode, int human)
 	}
 	else
 	{
-		TAS_Print(human, "record mode: you walk and hold a knife. tas_record starts recording where you are (again to save); tas_mode edit goes back to noclip");
+		TAS_Print(human, "record mode: you walk, without a weapon (260, as the replay bot). tas_record starts recording where you are (again to save); tas_mode edit goes back to noclip");
 		TAS_Print(human, "  editor previews wait while you're in record mode; tas_run still plays on the replay bot");
 		TAS_Chat(human, "record mode: tas_record to start recording, tas_mode edit for noclip");
 	}

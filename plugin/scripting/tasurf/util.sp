@@ -157,47 +157,22 @@ void SetCvarIfDifferent(const char[] name, const char[] value)
 	}
 }
 
-// Remove (and delete) every weapon, or every weapon but the knife, which is returned (-1: none).
-int Weapons_Strip(int client, bool keepKnife)
+// Remove (and delete) every weapon. Without one a player runs at 260 (CS:S's own speed without a
+// weapon, as on KSF); a weapon in hand caps it at the weapon's speed (knife and pistols 250), even
+// though m_flMaxspeed still reads 260.
+void Weapons_Strip(int client)
 {
-	int knife = -1;
-	char cls[32];
 	for (int slot = 0; slot <= 5; slot++)
 	{
 		for (int guard = 0; guard < 8; guard++)  // grenades share a slot
 		{
 			int w = GetPlayerWeaponSlot(client, slot);
-			if (w == -1)
-			{
-				break;
-			}
-			GetEntityClassname(w, cls, sizeof(cls));
-			if (keepKnife && StrEqual(cls, "weapon_knife"))
-			{
-				knife = w;
-				break;
-			}
-			if (!RemovePlayerItem(client, w))
+			if (w == -1 || !RemovePlayerItem(client, w))
 			{
 				break;
 			}
 			AcceptEntityInput(w, "Kill");
 		}
-	}
-	return knife;
-}
-
-// Only a knife, in hand (maxspeed 250, the same as a pistol).
-void Weapons_KnifeOnly(int client)
-{
-	int knife = Weapons_Strip(client, true);
-	if (knife == -1)
-	{
-		knife = GivePlayerItem(client, "weapon_knife");
-	}
-	if (knife != -1 && GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") != knife)
-	{
-		FakeClientCommand(client, "use weapon_knife");
 	}
 }
 

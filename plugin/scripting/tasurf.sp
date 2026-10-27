@@ -15,7 +15,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define TAS_VERSION "0.15.0"
+#define TAS_VERSION "0.16.0"
 
 public Plugin myinfo =
 {
@@ -256,7 +256,7 @@ bool Run_CheckReady(int runner, int viewer)
 	{
 		if (runner == Bot_Get())
 		{
-			Weapons_KnifeOnly(runner);
+			Weapons_Strip(runner);
 		}
 		float maxspeed = GetEntPropFloat(runner, Prop_Send, "m_flMaxspeed");
 		if (FloatAbs(maxspeed - g_Start.maxspeed) > 0.01)
@@ -268,7 +268,7 @@ bool Run_CheckReady(int runner, int viewer)
 			}
 			else
 			{
-				TAS_Print(viewer, "the replay bot's maxspeed is %.2f (knife) but the start state was captured at %.2f: capture starts holding a knife or pistol, or remove \"maxspeed\" from the start (maxspeed 1 means freeze time).",
+				TAS_Print(viewer, "the replay bot's maxspeed is %.2f but the start state was captured at %.2f: capture it again, or remove \"maxspeed\" from the start (maxspeed 1 means freeze time).",
 					maxspeed, g_Start.maxspeed);
 			}
 			if (strict)

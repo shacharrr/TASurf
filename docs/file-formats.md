@@ -217,7 +217,7 @@ object (see [timeline-format.md](timeline-format.md#start)):
   "velocity_modifier": 1.000000,
   "stamina": 0.000000,
   "health": 100,
-  "maxspeed": 250.000000
+  "maxspeed": 260.000000
 }
 ```
 
@@ -244,7 +244,7 @@ unique keys, then one column line, then one row per tick:
 # cvar.sv_gravity 800
 # cvar.sv_airaccelerate 150
 # ...                                  (fixed list of movement convars; <missing> if absent)
-# player.maxspeed 250.000000
+# player.maxspeed 260.000000
 # start.origin -64.000000 3616.000000 -31.000000
 # start.origin_bits C2800000 45620000 C1F80000
 # start.angles 0.000000 180.000000 0.000000

@@ -98,7 +98,7 @@ in `tasurf.local.json`).
 | `stamina` | `0.0` | CS:S jump/landing slowdown (`m_flStamina`, ms left). 0 = rested. Always reset: without it, jumping just before `tas_run` slows the run's first second of walking. |
 | `velocity_modifier` | `1.0` | CS:S damage slowdown (`m_flVelocityModifier`). 1 = no slowdown. Always reset. |
 | `view_offset_z`, `health` | not touched | restored when present (`tas_setstart` captures them) |
-| `maxspeed` | not checked | player `m_flMaxspeed` at capture (weapon dependent: knife 250). The plugin refuses to run if it differs. |
+| `maxspeed` | not checked | player `m_flMaxspeed` at capture (260; captured only with a weapon in hand). The plugin refuses to run if it differs. |
 | `map` | none | if present, must equal the timeline's `map` |
 | `format`, `version` | | `"tasurf-start"`, `1` (written by `tas_setstart`) |
 
